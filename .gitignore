@@ -1,4 +1,4 @@
 config.py
 __pycache__/
-df/df_mmlupro_original.csv
+df/*
 .env
