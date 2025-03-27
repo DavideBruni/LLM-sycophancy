@@ -26,8 +26,6 @@ class APIKeyTester:
         self.ohmygpt_working_url = None
 
     def test_openai_key(self) -> bool:
-        """Test the OpenAI API key from config with the official OpenAI endpoint."""
-        print("Testing OpenAI key:")
         openai.api_key = self.openai_key
         openai.api_base = self.openai_url
         try:
@@ -37,15 +35,11 @@ class APIKeyTester:
                 temperature=self.default_temperature,
                 timeout=self.default_timeout
             )
-            print("OpenAI key works")
             return True
         except Exception as e:
-            print(f"OpenAI key failed: {type(e).__name__} - {str(e)}")
             return False
 
     def test_ohmygpt_key(self) -> bool:
-        """Test the OhMyGPT API key from config with endpoints from config."""
-        print("Testing OhMyGPT key:")
         openai.api_key = self.ohmygpt_key
         for url in self.ohmygpt_urls:
             openai.api_base = url
@@ -56,17 +50,13 @@ class APIKeyTester:
                     temperature=self.default_temperature,
                     timeout=self.default_timeout
                 )
-                print(f"OhMyGPT key works with {url}")
                 self.ohmygpt_working_url = url  # Store the working URL
                 return True
             except Exception as e:
-                print(f"Failed with {url}: {type(e).__name__} - {str(e)}")
-        print("OhMyGPT key failed for all URLs")
+                continue
         return False
 
     def test_zhizengzeng_key(self) -> bool:
-        """Test the Zhizengzeng API key from config with their endpoint."""
-        print("Testing Zhizengzeng key:")
         openai.api_key = self.zhizengzeng_key
         openai.api_base = self.zhizengzeng_url
         try:
@@ -76,18 +66,56 @@ class APIKeyTester:
                 temperature=self.default_temperature,
                 timeout=self.default_timeout
             )
-            print("Zhizengzeng key works")
             return True
         except Exception as e:
-            print(f"Zhizengzeng key failed: {type(e).__name__} - {str(e)}")
             return False
+
+    def get_working_api_key(self) -> tuple[str, str]:
+        """
+        Test all API keys, print results, select a working key, print which is used, and return it.
+        Returns a tuple of (api_key, api_base_url).
+        Priority: OpenAI > OhMyGPT > Zhizengzeng.
+        """
+        # Step 1: Test all API keys
+        results = {
+            "OpenAI": self.test_openai_key(),
+            "OhMyGPT": self.test_ohmygpt_key(),
+            "Zhizengzeng": self.test_zhizengzeng_key()
+        }
+
+        # Step 2: Identify working keys
+        working_keys = {}
+        print("\nAPI Key Test Results:")
+        for service, works in results.items():
+            print(f"{service}: {'Yes' if works else 'No'}")
+            if works:
+                if service == "OpenAI":
+                    working_keys[service] = {"key": self.openai_key, "url": self.openai_url}
+                elif service == "OhMyGPT":
+                    url = getattr(self, 'ohmygpt_working_url', None) or self.ohmygpt_urls[0]
+                    working_keys[service] = {"key": self.ohmygpt_key, "url": url}
+                elif service == "Zhizengzeng":
+                    working_keys[service] = {"key": self.zhizengzeng_key, "url": self.zhizengzeng_url}
+
+        # Step 3: Select a working key based on priority
+        if not working_keys:
+            raise ValueError("No working API keys found. Check config.py and network connectivity.")
+        
+        # Priority order: OpenAI > OhMyGPT > Zhizengzeng
+        for service in ["OpenAI", "OhMyGPT", "Zhizengzeng"]:
+            if service in working_keys:
+                selected_service = service
+                selected_key = working_keys[selected_service]["key"]
+                selected_url = working_keys[selected_service]["url"]
+                print(f"\nUsing {selected_service} key with URL: {selected_url}")
+                return selected_key, selected_url
+
+        raise ValueError("Unexpected error in key selection.")
 
 
 if __name__ == "__main__":
     tester = APIKeyTester()
-    print("Testing OpenAI key:")
-    print(tester.test_openai_key())
-    print("\nTesting OhMyGPT key:")
-    print(tester.test_ohmygpt_key())
-    print("\nTesting Zhizengzeng key:")
-    print(tester.test_zhizengzeng_key())
+    print("\nSelecting a working API key...")
+    api_key, api_base = tester.get_working_api_key()
+    openai.api_key = api_key
+    openai.api_base = api_base
