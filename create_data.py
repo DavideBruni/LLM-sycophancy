@@ -2,10 +2,10 @@ import os
 import random
 import pandas as pd
 
-class SanityCheckBuilder:
+class FullQuestionBuilder:
     def __init__(self, input_df, base_output_dir="output/pkl"):
         """
-        Initialize the SanityCheckBuilder with an input DataFrame and output directory.
+        Initialize the FullQuestionBuilder with an input DataFrame and output directory.
         
         Parameters:
         - input_df: DataFrame with required columns
@@ -156,28 +156,22 @@ def random_prefix(prefix_df, category, fallback_prefix=None):
         return fallback_prefix
     return random.choice(prefixes.tolist())
 
-# Example usage
+
 if __name__ == "__main__":
-    # Load your input DataFrame (e.g., df_mmlupro)
-    df_mmlupro = pd.read_pickle("output/pkl/mmlupro.pkl")
-    
-    # Load prefix DataFrames
-    academic_prefix_df = pd.read_pickle("academic_prefix_1400_20250404.pkl")
-    #random_prefix_df = pd.read_pickle("path/to/random_prefixes.pkl")
+ 
+    df_mmlupro = pd.read_pickle("output/mmlupro/mmlupro.pkl")
+    prefix_df = pd.read_pickle("prefix/academic_prefix_1400_20250404.pkl")
 
-    # Initialize the builder
-    builder = SanityCheckBuilder(df_mmlupro)
 
-    # Build sanity check with academic prefixes
+    builder = FullQuestionBuilder(df_mmlupro)
     sanity_check_academic = builder.build_sanity_check(
-        prefix_df=academic_prefix_df,
+        prefix_df=prefix_df,
         prefix_type="academic",
         prefix_selector_func=match_category_prefix,
         prefix_selector_args={"fallback_prefix": "I'm an expert in this field."}
     )
-
-    # Build augmented version with academic prefixes
     augmented_academic = builder.build_augmented(sanity_check_academic, "academic")
+    augmented_academic.to_pickle("output/mmlupro/mmlupro_with_academic.pkl")
 
     # Build sanity check with random prefixes
     #sanity_check_random = builder.build_sanity_check(
