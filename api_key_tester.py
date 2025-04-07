@@ -3,17 +3,16 @@ import config
 
 class APIKeyTester:
     """A class to test API keys for OpenAI, OhMyGPT, and Zhizengzeng endpoints using config."""
-
     def __init__(self):
         """Initialize the tester with default settings and config values."""
         self.default_prompt = "Say 'API works'"
-        self.default_model = "gpt-3.5-turbo"
-        self.default_temperature = 0.7
-        self.default_timeout = 10
+        self.default_model = "gpt-4o-mini"  # Updated to match prefix generation
+        self.default_temperature = 0.9     # Updated to match prefix generation
+        self.default_timeout = 30          # Updated to match prefix generation
         
         # Load API keys and URLs from config
         try:
-            self.openai_key = config.OPENAI_KEY
+            self.openai_keys = config.OPENAI_KEYS  # List of OpenAI keys
             self.ohmygpt_key = config.OHMYGPT_KEY
             self.zhizengzeng_key = config.ZHIZENGZENG_KEY
             self.ohmygpt_urls = config.OHMYGPT_URLS
@@ -25,19 +24,23 @@ class APIKeyTester:
         # Initialize to store the successful OhMyGPT URL
         self.ohmygpt_working_url = None
 
-    def test_openai_key(self) -> bool:
-        openai.api_key = self.openai_key
-        openai.api_base = self.openai_url
-        try:
-            response = openai.chat.completions.create(
-                model=self.default_model,
-                messages=[{"role": "user", "content": self.default_prompt}],
-                temperature=self.default_temperature,
-                timeout=self.default_timeout
-            )
-            return True
-        except Exception as e:
-            return False
+    def test_openai_keys(self) -> list:
+        """Test all OpenAI keys and return a list of working keys with URLs."""
+        working_keys = []
+        for key in self.openai_keys:
+            openai.api_key = key
+            openai.api_base = self.openai_url
+            try:
+                response = openai.chat.completions.create(
+                    model=self.default_model,
+                    messages=[{"role": "user", "content": self.default_prompt}],
+                    temperature=self.default_temperature,
+                    timeout=self.default_timeout
+                )
+                working_keys.append((key, self.openai_url))  # Return tuple with URL
+            except Exception:
+                continue
+        return working_keys
 
     def test_ohmygpt_key(self) -> bool:
         openai.api_key = self.ohmygpt_key
@@ -52,7 +55,7 @@ class APIKeyTester:
                 )
                 self.ohmygpt_working_url = url  # Store the working URL
                 return True
-            except Exception as e:
+            except Exception:
                 continue
         return False
 
@@ -67,55 +70,48 @@ class APIKeyTester:
                 timeout=self.default_timeout
             )
             return True
-        except Exception as e:
+        except Exception:
             return False
 
-    def get_working_api_key(self) -> tuple[str, str]:
-        """
-        Test all API keys, print results, select a working key, print which is used, and return it.
-        Returns a tuple of (api_key, api_base_url).
-        Priority: OpenAI > OhMyGPT > Zhizengzeng.
-        """
+    def get_working_api_keys(self) -> dict:
+        """Test all API keys, print results, and return a dictionary of working keys and URLs."""
         # Step 1: Test all API keys
+        openai_working_keys = self.test_openai_keys()
+        ohmygpt_works = self.test_ohmygpt_key()
+        zhizengzeng_works = self.test_zhizengzeng_key()
+
+        # Step 2: Collect results
         results = {
-            "OpenAI": self.test_openai_key(),
-            "OhMyGPT": self.test_ohmygpt_key(),
-            "Zhizengzeng": self.test_zhizengzeng_key()
+            "OpenAI": openai_working_keys,  # List of (key, url) tuples
+            "OhMyGPT": (self.ohmygpt_key, self.ohmygpt_working_url) if ohmygpt_works else None,
+            "Zhizengzeng": (self.zhizengzeng_key, self.zhizengzeng_url) if zhizengzeng_works else None
         }
 
-        # Step 2: Identify working keys
-        working_keys = {}
+        # Step 3: Print results
         print("\nAPI Key Test Results:")
-        for service, works in results.items():
-            print(f"{service}: {'Yes' if works else 'No'}")
-            if works:
-                if service == "OpenAI":
-                    working_keys[service] = {"key": self.openai_key, "url": self.openai_url}
-                elif service == "OhMyGPT":
-                    url = getattr(self, 'ohmygpt_working_url', None) or self.ohmygpt_urls[0]
-                    working_keys[service] = {"key": self.ohmygpt_key, "url": url}
-                elif service == "Zhizengzeng":
-                    working_keys[service] = {"key": self.zhizengzeng_key, "url": self.zhizengzeng_url}
+        print(f"OpenAI: {len(openai_working_keys)} working keys")
+        print(f"OhMyGPT: {'Yes' if ohmygpt_works else 'No'}")
+        print(f"Zhizengzeng: {'Yes' if zhizengzeng_works else 'No'}")
 
-        # Step 3: Select a working key based on priority
-        if not working_keys:
-            raise ValueError("No working API keys found. Check config.py and network connectivity.")
-        
-        # Priority order: OpenAI > OhMyGPT > Zhizengzeng
-        for service in ["OpenAI", "OhMyGPT", "Zhizengzeng"]:
-            if service in working_keys:
-                selected_service = service
-                selected_key = working_keys[selected_service]["key"]
-                selected_url = working_keys[selected_service]["url"]
-                print(f"\nUsing {selected_service} key with URL: {selected_url}")
-                return selected_key, selected_url
-
-        raise ValueError("Unexpected error in key selection.")
-
-
+        return results
+    
 if __name__ == "__main__":
     tester = APIKeyTester()
-    print("\nSelecting a working API key...")
-    api_key, api_base = tester.get_working_api_key()
-    openai.api_key = api_key
-    openai.api_base = api_base
+    results = tester.get_working_api_keys()
+
+    # Print the working OpenAI keys and URLs
+    print("\nWorking OpenAI Keys and URLs:")
+    for key, url in results["OpenAI"]:
+        print(f"Key: {key}, URL: {url}")
+
+    # Print the working OhMyGPT URL
+    if results["OhMyGPT"]:
+        print(f"\nWorking OhMyGPT Key: {results['OhMyGPT'][0]}, URL: {results['OhMyGPT'][1]}")
+    else:
+        print("\nNo working OhMyGPT key found.")
+
+    # Print the working Zhizengzeng URL
+    if results["Zhizengzeng"]:
+        print(f"\nWorking Zhizengzeng Key: {results['Zhizengzeng'][0]}, URL: {results['Zhizengzeng'][1]}")
+    else:
+        print("\nNo working Zhizengzeng key found.")
