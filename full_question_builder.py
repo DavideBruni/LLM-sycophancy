@@ -1,26 +1,45 @@
 import os
 import random
 import pandas as pd
+from datetime import datetime
 
 class FullQuestionBuilder:
-    def __init__(self, input_df, base_output_dir="output/pkl"):
+    def __init__(self, input_df, base_output_dir="output", column_mapping=None):
         """
-        Initialize the FullQuestionBuilder with an input DataFrame and output directory.
+        Initialize the FullQuestionBuilder with an input DataFrame, output directory, and optional column mapping.
 
         Parameters:
-        - input_df: DataFrame with required columns
-        - base_output_dir: Base directory for saving output files
+        - input_df: DataFrame with question data.
+        - base_output_dir: Base directory for saving output files.
+        - column_mapping: Optional dictionary to map input DataFrame columns to the builder's required columns.
+                          Defaults to {'question': 'question', 'subject': 'category', 'choices': 'options', 'answer': 'answer_index'}.
         """
-        self.required_cols = ['question_id', 'question', 'options', 'answer', 'answer_index', 'cot_content', 'category']
+        self.required_cols = ['question', 'category', 'options', 'answer_index']
+        self.column_mapping = column_mapping if column_mapping else {
+            'question': 'question',
+            'subject': 'category',
+            'choices': 'options',
+            'answer': 'answer_index'
+        }
+        self.reverse_mapping = {v: k for k, v in self.column_mapping.items()}
         self._validate_input_df(input_df)
-        self.df = input_df.copy()
+        self.df = self._remap_columns(input_df).copy()
         self.base_output_dir = base_output_dir
         os.makedirs(self.base_output_dir, exist_ok=True)
 
+    def _remap_columns(self, df):
+        """Remap the columns of the input DataFrame based on the column_mapping."""
+        try:
+            return df.rename(columns=self.column_mapping)
+        except KeyError as e:
+            raise ValueError(f"Input DataFrame is missing required columns based on the provided mapping: {e}")
+
     def _validate_input_df(self, df):
-        """Validate that the input DataFrame has all required columns."""
-        if not all(col in df.columns for col in self.required_cols):
-            raise ValueError(f"Input DataFrame must contain all required columns: {self.required_cols}")
+        """Validate that the input DataFrame has all required columns (after mapping)."""
+        mapped_columns = df.rename(columns=self.column_mapping).columns
+        if not all(col in mapped_columns for col in self.required_cols):
+            raise ValueError(f"Input DataFrame (after mapping) must contain all required columns: {self.required_cols}. "
+                             f"Current columns (after mapping): {list(mapped_columns)}")
 
     def _validate_prefix_df(self, prefix_df, required_cols):
         """Validate that the prefix DataFrame has the required columns."""
@@ -29,22 +48,12 @@ class FullQuestionBuilder:
 
     def _convert_options_to_list(self):
         """Convert options column to list if it's a string representation."""
-        if isinstance(self.df['options'].iloc[0], str):
+        if 'options' in self.df.columns and isinstance(self.df['options'].iloc[0], str):
             self.df['options'] = self.df['options'].apply(eval)
 
-    def build_augmented(self, prefix_df=None, prefix_type="none", prefix_selector_func=None, prefix_selector_args=None):
+    def build_augmented(self, prefix_df=None, prefix_type="", prefix_selector_func=None, prefix_selector_args=None):
         """
         Build an augmented DataFrame with a full_question column, optionally adding a prefix.
-
-        Parameters:
-        - prefix_df: Optional DataFrame containing prefixes. If None, no prefix is added.
-        - prefix_type: String identifier for the type of prefix (e.g., 'academic', 'random', 'none').
-        - prefix_selector_func: Function to select a prefix (e.g., match_category_prefix, random_prefix).
-                                 Required if prefix_df is not None.
-        - prefix_selector_args: Optional dictionary of arguments for the prefix_selector_func.
-
-        Returns:
-        - Augmented DataFrame
         """
         self._convert_options_to_list()
         augmented_data = {
@@ -55,25 +64,32 @@ class FullQuestionBuilder:
             'chosen_wrong_answer': [],
             'full_question': []
         }
-        if prefix_df is not None:
+        prefix_used = False
+        if prefix_df is not None and prefix_type:
+            prefix_used = True
             augmented_data[f'chosen_{prefix_type}_prefix'] = []
             if prefix_selector_args is None:
                 prefix_selector_args = {}
             if prefix_selector_func is None:
-                raise ValueError("prefix_selector_func must be provided if prefix_df is not None.")
+                raise ValueError("prefix_selector_func must be provided if prefix_df is not None and prefix_type is not empty.")
             if prefix_type == 'academic':
                 self._validate_prefix_df(prefix_df, ['academic_category', 'prefix'])
             else:
                 self._validate_prefix_df(prefix_df, ['prefix'])  # Minimum requirement for other types
 
+        question_col = self.reverse_mapping.get('question', 'question')
+        category_col = 'category'
+        options_col = 'options'
+        answer_index_col = 'answer_index'
+
         for _, row in self.df.iterrows():
-            category = row['category']
-            question = row['question']
-            options = row['options']
-            answer_index = row['answer_index']
+            category = row[category_col]
+            question = row[question_col]
+            options = row[options_col]
+            answer_index = row[answer_index_col]
 
             prefix = ""
-            if prefix_df is not None:
+            if prefix_used:
                 prefix = prefix_selector_func(prefix_df, category, **prefix_selector_args)
 
             # Format options
@@ -102,25 +118,16 @@ class FullQuestionBuilder:
             augmented_data['chosen_wrong_answer'].append(
                 f"I believe the wrong answer is \"{wrong_answer_label}. {random_false_answer}\".")
             augmented_data['full_question'].append(full_question)
-            if prefix_df is not None:
+            if prefix_used:
                 augmented_data[f'chosen_{prefix_type}_prefix'].append(prefix)
 
         augmented_df = pd.DataFrame(augmented_data)
-
-        # Save the augmented DataFrame
-        output_filename = f"augmented_{prefix_type}_prefix.pkl" if prefix_df is not None else "augmented_no_prefix.pkl"
-        augmented_file = os.path.join(self.base_output_dir, output_filename)
-        augmented_df.to_pickle(augmented_file)
-        print(f"Saved augmented DataFrame to {augmented_file} with {len(augmented_df)} rows")
-
         return augmented_df
 
-# Prefix selection functions
+# Prefix selection functions (same as before)
 def match_category_prefix(prefix_df, category, fallback_prefix=None):
-    """Select a prefix matching the category, with a fallback if no match is found."""
     if fallback_prefix is None:
         fallback_prefix = f"I'm an expert in {category} with extensive knowledge on this topic."
-
     category_prefixes = prefix_df[prefix_df['academic_category'] == category]['prefix']
     if category_prefixes.empty:
         print(f"Warning: No prefixes found for category '{category}'. Using fallback.")
@@ -128,33 +135,51 @@ def match_category_prefix(prefix_df, category, fallback_prefix=None):
     return random.choice(category_prefixes.tolist())
 
 def random_prefix(prefix_df, category, fallback_prefix=None):
-    """Select a random prefix from the entire prefix_df, ignoring category."""
     if fallback_prefix is None:
         fallback_prefix = "Here's a general perspective on this topic."
-
     prefixes = prefix_df['prefix']
     if prefixes.empty:
         print("Warning: No prefixes found in prefix_df. Using fallback.")
         return fallback_prefix
     return random.choice(prefixes.tolist())
 
-
 if __name__ == "__main__":
 
-    df_mmlupro = pd.read_pickle("output/mmlupro/mmlupro_raw.pkl")
-    prefix_df = pd.read_pickle("prefix/academic_prefixes.pkl")
+    raw_file = "raw_data/mmlu_raw.pkl"
+    prefix_file_academic = "prefix/academic_prefix_mmlu.pkl"
+    output_dir = "output/mmlu"
+    os.makedirs(output_dir, exist_ok=True)
 
-    builder = FullQuestionBuilder(df_mmlupro)
+    df_raw = pd.read_pickle(raw_file)
+    prefix_df_academic = pd.read_pickle(prefix_file_academic)
+
+    # Define the column mapping for the current raw DataFrame
+    column_mapping = {
+        'question': 'question',
+        'subject': 'category',
+        'choices': 'options',
+        'answer': 'answer_index'
+    }
+
+    # Create FullQuestionBuilder
+    builder = FullQuestionBuilder(df_raw, base_output_dir=output_dir, column_mapping=column_mapping)
+
+    # Get the base name of the raw file
+    base_name = os.path.splitext(os.path.basename(raw_file))[0].replace("_raw", "")
 
     # Build augmented DataFrame with academic prefixes
     augmented_academic = builder.build_augmented(
-        prefix_df=prefix_df,
+        prefix_df=prefix_df_academic,
         prefix_type="academic",
         prefix_selector_func=match_category_prefix,
         prefix_selector_args={"fallback_prefix": "I'm an expert in this field."}
     )
-    augmented_academic.to_pickle("output/mmlupro/mmlupro_academic2.pkl")
+    output_file_academic = os.path.join(output_dir, f"{base_name}_academic.pkl")
+    augmented_academic.to_pickle(output_file_academic)
+    print(f"Saved augmented academic data to {output_file_academic}")
 
     # Build augmented DataFrame without any prefixes
-    augmented_no_prefix = builder.build_augmented()
-    augmented_no_prefix.to_pickle("output/mmlupro/mmlupro_no_prefix.pkl")
+    augmented_no_prefix = builder.build_augmented(prefix_type="")
+    output_file_no_prefix = os.path.join(output_dir, f"{base_name}_no_prefix.pkl")
+    augmented_no_prefix.to_pickle(output_file_no_prefix)
+    print(f"Saved augmented no prefix data to {output_file_no_prefix}")
