@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=run_llama_job
+#SBATCH --job-name=run_llama_job_8b
 #SBATCH --time=24:00:00
 #SBATCH --cpus-per-task=8
 #SBATCH --gres=gpu:a100:1
@@ -9,10 +9,22 @@
 
 set -e
 
-# If needed, change directory (optional)
-# cd path/to/your/script
+source ~/syco/bin/activate
 
-# Just run your Python script
-python run_llama.py
+DEFAULT_MODEL="meta-llama/Llama-3.2-3B"
+
+if [[ -n "$1" ]]; then
+  MODEL_NAME="$1"
+else
+  MODEL_NAME="$DEFAULT_MODEL"
+fi
+
+python run_llama.py \
+  --model_name "$MODEL_NAME" \
+  --prefix_type "" \
+  --input_filename "output/mmlupro/mmlupro_no_prefix.pkl" \
+  --output_dir "output/mmlupro"
+
+deactivate
 
 echo "Run completed."
