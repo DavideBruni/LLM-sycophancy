@@ -22,8 +22,10 @@ fi
 python run_llama.py \
   --model_name "$MODEL_NAME" \
   --prefix_type "" \
-  --input_filename "output/mmlupro/mmlupro_no_prefix.pkl" \
-  --output_dir "output/mmlupro"
+  --question_style "plain" \
+  --input_filename "output/mmlu/mmlu_plain.pkl" \
+  --output_dir "output/mmlu" \
+  --max_retries 2
 
 deactivate
 

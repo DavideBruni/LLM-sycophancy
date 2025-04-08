@@ -16,9 +16,17 @@ logging.basicConfig(filename='inference.log', level=logging.INFO,
 def parse_args():
     parser = argparse.ArgumentParser(description="Run LLaMA inference on a dataset with pre-constructed questions.")
     parser.add_argument("--model_name", type=str, default="meta-llama/Llama-3.2-1B", help="Model name for inference")
-    parser.add_argument("--prefix_type", type=str, default="", choices=["academic", "behavior", ""], help="Type of prefix used in the input file (for naming purposes). Use '' if no prefix.")
-    parser.add_argument("--input_filename", type=str, default="output/mmlupro/mmlupro_academic.pkl", help="Input .pkl file with pre-constructed questions")
+    parser.add_argument("--prefix_type", type=str, default="", 
+                        choices=["academic", "behavior", ""], 
+                        help="Type of prefix used (e.g., 'academic', 'behavior'), or '' for no prefix.")
+    parser.add_argument("--question_style", type=str, default="plain", 
+                        choices=["prefix_and_opinion", "opinion_only", "plain"], 
+                        help="Style of the questions: 'prefix_and_opinion' (prefix + opinion), "
+                             "'opinion_only' (just opinion), or 'plain' (no prefix or opinion).")
+    parser.add_argument("--input_filename", type=str, default="output/mmlupro/mmlupro_plain.pkl", 
+                        help="Input .pkl file with pre-constructed questions")
     parser.add_argument("--output_dir", type=str, default="output/mmlupro", help="Output directory")
+    parser.add_argument("--max_retries", type=int, default=3, help="Maximum number of retries for invalid answers")
     return parser.parse_args()
 
 def is_valid_answer(answer):
@@ -28,7 +36,8 @@ def is_valid_answer(answer):
 def process_question(question, tokenizer, model, device):
     """Process a single question and return the model's answer."""
     try:
-        prompt = f"Output only a single uppercase letter (A, B, C, D, etc.) and nothing else:\n\n{question}\n\nAnswer:"
+        # Use clear delimiters to isolate the question
+        prompt = f"Question: ||{question}||\nRespond with exactly one uppercase letter (A, B, C, D, etc.) and nothing else.\nAnswer:"
         inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=4096)
         inputs = {key: value.to(device) for key, value in inputs.items()}
 
@@ -44,10 +53,16 @@ def process_question(question, tokenizer, model, device):
         generated_token = outputs[0][inputs['input_ids'].shape[-1]:]
         generated_text = tokenizer.decode(generated_token, skip_special_tokens=True).strip()
 
-        if not is_valid_answer(generated_text):
+        # Post-process to ensure a single uppercase letter
+        if generated_text and generated_text[0].isupper() and generated_text[0].isalpha():
+            result = generated_text[0]
+        else:
+            result = generated_text if is_valid_answer(generated_text) else ""
+
+        if not is_valid_answer(result):
             logging.warning(f"Invalid output for question: '{question[:50]}...'. Generated: '{generated_text}'")
 
-        return generated_text
+        return result
     except Exception as e:
         logging.error(f"Error processing question: {e}")
         return "Error"
@@ -56,9 +71,14 @@ def main():
     args = parse_args()
     model_name = args.model_name
     prefix_type = args.prefix_type
+    question_style = args.question_style
     input_filename = args.input_filename
     output_dir = args.output_dir
-    max_retries = 3
+    max_retries = args.max_retries
+
+    # Validate that prefix_type is provided when question_style requires it
+    if question_style == "prefix_and_opinion" and not prefix_type:
+        raise ValueError("For 'prefix_and_opinion' question_style, a prefix_type (e.g., 'academic' or 'behavior') must be specified.")
 
     hf_token = config.HF_TOKEN
     if not hf_token:
@@ -135,15 +155,16 @@ def main():
         else:
             print("All entries successfully populated with valid answers!")
             logging.info("All entries successfully populated with valid answers!")
-
-        # Save the output DataFrame
-        model_short_name = model_name.split("/")[-1].replace(".", "_")
-        timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-        prefix_identifier = f"_{prefix_type}_out" if prefix_type else "_no_prefix_out"
-        output_filename = f"{output_dir}/mmlupro{prefix_identifier}_{model_short_name}_{timestamp_str}.pkl"
-        if prefix_type == "":
-            output_filename = f"{output_dir}/mmlupro_no_prefix_{model_short_name}_{timestamp_str}.pkl"
-
+          
+            parent_dir_name = os.path.basename(os.path.dirname(input_filename))
+            model_short_name = model_name.split("/")[-1].replace(".", "_")
+            timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+            if question_style == "prefix_and_opinion":
+                output_filename = f"{output_dir}/{parent_dir_name}_{prefix_type}_opinion_out_{model_short_name}_{timestamp_str}.pkl"
+            elif question_style == "opinion_only":
+                output_filename = f"{output_dir}/{parent_dir_name}_opinion_only_out_{model_short_name}_{timestamp_str}.pkl"
+            else:  # plain
+                output_filename = f"{output_dir}/{parent_dir_name}_plain_out_{model_short_name}_{timestamp_str}.pkl"
 
         df.to_pickle(output_filename)
         print(f"Completed and saved to {output_filename} with {len(df)} rows!")
