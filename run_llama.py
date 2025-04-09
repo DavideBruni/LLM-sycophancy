@@ -36,7 +36,6 @@ def is_valid_answer(answer):
 def process_question(question, tokenizer, model, device):
     """Process a single question and return the model's answer."""
     try:
-        # Use clear delimiters to isolate the question
         prompt = f"Question: ||{question}||\nRespond with exactly one uppercase letter (A, B, C, D, etc.) and nothing else.\nAnswer:"
         inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=4096)
         inputs = {key: value.to(device) for key, value in inputs.items()}
@@ -53,7 +52,6 @@ def process_question(question, tokenizer, model, device):
         generated_token = outputs[0][inputs['input_ids'].shape[-1]:]
         generated_text = tokenizer.decode(generated_token, skip_special_tokens=True).strip()
 
-        # Post-process to ensure a single uppercase letter
         if generated_text and generated_text[0].isupper() and generated_text[0].isalpha():
             result = generated_text[0]
         else:
@@ -76,7 +74,6 @@ def main():
     output_dir = args.output_dir
     max_retries = args.max_retries
 
-    # Validate that prefix_type is provided when question_style requires it
     if question_style == "prefix_and_opinion" and not prefix_type:
         raise ValueError("For 'prefix_and_opinion' question_style, a prefix_type (e.g., 'academic' or 'behavior') must be specified.")
 
@@ -102,15 +99,13 @@ def main():
         print(f"Loaded DataFrame with {len(df)} entries from {input_filename}.")
         logging.info(f"Loaded DataFrame with {len(df)} entries from {input_filename}.")
 
-        # Ensure the DataFrame has a 'full_question' column
         if "full_question" not in df.columns:
             raise ValueError(f"Input DataFrame '{input_filename}' must contain a 'full_question' column.")
 
-        # Ensure the DataFrame has a column for LLaMA answers
         if "model_answer" not in df.columns:
             df["model_answer"] = None
 
-        # Process each question using the LLaMA model
+        # Process each question
         questions = df["full_question"].tolist()
         for i, question in tqdm(enumerate(questions), total=len(questions), desc="Initial processing"):
             if not is_valid_answer(df.at[i, "model_answer"]):
@@ -142,7 +137,21 @@ def main():
             retry_count += 1
             time.sleep(1)
 
-        # Check for remaining invalid answers
+        # Extract dataset name from input filename (e.g., 'mmlu' from 'mmlu_plain.pkl')
+        input_base = os.path.splitext(os.path.basename(input_filename))[0]  # e.g., 'mmlu_plain'
+        dataset_name = input_base.split('_')[0]  # e.g., 'mmlu'
+
+        # Define output filename using dataset_name
+        model_short_name = model_name.split("/")[-1].replace(".", "_")
+        timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+        if question_style == "prefix_and_opinion":
+            output_filename = f"{output_dir}/{dataset_name}_{prefix_type}_opinion_out_{model_short_name}_{timestamp_str}.pkl"
+        elif question_style == "opinion_only":
+            output_filename = f"{output_dir}/{dataset_name}_opinion_only_out_{model_short_name}_{timestamp_str}.pkl"
+        else:  # plain
+            output_filename = f"{output_dir}/{dataset_name}_plain_out_{model_short_name}_{timestamp_str}.pkl"
+
+        # Check for invalid answers and save regardless
         invalid_count = len(df[
             df["model_answer"].isna() |
             (df["model_answer"] == "") |
@@ -155,16 +164,6 @@ def main():
         else:
             print("All entries successfully populated with valid answers!")
             logging.info("All entries successfully populated with valid answers!")
-          
-            parent_dir_name = os.path.basename(os.path.dirname(input_filename))
-            model_short_name = model_name.split("/")[-1].replace(".", "_")
-            timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-            if question_style == "prefix_and_opinion":
-                output_filename = f"{output_dir}/{parent_dir_name}_{prefix_type}_opinion_out_{model_short_name}_{timestamp_str}.pkl"
-            elif question_style == "opinion_only":
-                output_filename = f"{output_dir}/{parent_dir_name}_opinion_only_out_{model_short_name}_{timestamp_str}.pkl"
-            else:  # plain
-                output_filename = f"{output_dir}/{parent_dir_name}_plain_out_{model_short_name}_{timestamp_str}.pkl"
 
         df.to_pickle(output_filename)
         print(f"Completed and saved to {output_filename} with {len(df)} rows!")
