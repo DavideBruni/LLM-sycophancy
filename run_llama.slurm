@@ -19,11 +19,16 @@ else
   MODEL_NAME="$DEFAULT_MODEL"
 fi
 
+# set huggingface cache dir
+export HF_HOME="/ibex/user/wangk0e/cache/huggingface"
+
 python run_llama.py \
   --model_name "$MODEL_NAME" \
   --prefix_type "" \
-  --input_filename "output/mmlupro/mmlupro_no_prefix.pkl" \
-  --output_dir "output/mmlupro"
+  --question_style "plain" \
+  --input_filename "output/mmlupro/mmlupro_plain.pkl" \
+  --output_dir "output/mmlupro" \
+  --max_retries 1
 
 deactivate
 

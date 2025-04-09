@@ -99,18 +99,16 @@ if __name__ == "__main__":
     tester = APIKeyTester()
     results = tester.get_working_api_keys()
 
-    # Print the working OpenAI keys and URLs
+
     print("\nWorking OpenAI Keys and URLs:")
     for key, url in results["OpenAI"]:
         print(f"Key: {key}, URL: {url}")
 
-    # Print the working OhMyGPT URL
     if results["OhMyGPT"]:
         print(f"\nWorking OhMyGPT Key: {results['OhMyGPT'][0]}, URL: {results['OhMyGPT'][1]}")
     else:
         print("\nNo working OhMyGPT key found.")
 
-    # Print the working Zhizengzeng URL
     if results["Zhizengzeng"]:
         print(f"\nWorking Zhizengzeng Key: {results['Zhizengzeng'][0]}, URL: {results['Zhizengzeng'][1]}")
     else:

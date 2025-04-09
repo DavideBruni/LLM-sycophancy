@@ -4,3 +4,6 @@ df/*
 .env
 dcgm/
 logs/
+
+output/mmlupro/**/*_out_*.pkl
+inference.log
