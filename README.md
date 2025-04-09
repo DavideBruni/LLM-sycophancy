@@ -1,6 +1,6 @@
 # LLM Sycophancy
 
-## How to Use
+## How to Use (Ibex as an example)
 
 1. Submit the job:
 
