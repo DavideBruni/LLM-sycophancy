@@ -8,9 +8,10 @@ from datetime import datetime
 import argparse
 import logging
 import os
+import traceback
 
 # Set up logging
-logging.basicConfig(filename='inference.log', level=logging.INFO,
+logging.basicConfig(filename='inference.log', level=logging.DEBUG,
                     format='%(asctime)s - %(levelname)s - %(message)s')
 
 def parse_args():
@@ -39,17 +40,23 @@ def is_valid_answer(answer):
     """Check if the answer is a single uppercase letter."""
     return isinstance(answer, str) and len(answer) == 1 and answer.isupper() and answer.isalpha()
 
-def process_question(question, tokenizer, model, device):
+def process_question(question, tokenizer, model, device, question_index):
     """Process a single question, return the model's answer and probabilities for A, B, C, D."""
     try:
+        logging.debug(f"Processing question at index {question_index}: '{question[:50]}...'")
+        if not isinstance(question, str) or not question.strip():
+            raise ValueError(f"Invalid question at index {question_index}: must be a non-empty string, got '{question}'")
+
         prompt = f"Question: ||{question}||\nRespond with exactly one uppercase letter (A, B, C, D, etc.) and nothing else.\nAnswer:"
         inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=4096)
         inputs = {key: value.to(device) for key, value in inputs.items()}
 
+        logging.debug(f"Input IDs shape: {inputs['input_ids'].shape}")
         with torch.no_grad():
             outputs = model(**inputs)
         
         logits = outputs.logits
+        logging.debug(f"Logits shape: {logits.shape}")
         last_token_logits = logits[0, -1]
         probs = torch.softmax(last_token_logits, dim=-1)
 
@@ -62,14 +69,15 @@ def process_question(question, tokenizer, model, device):
                 answer_probs[letter] = 0.0
 
         max_prob_letter = max(answer_probs, key=answer_probs.get)
+        logging.debug(f"Predicted answer: {max_prob_letter}, Probabilities: {answer_probs}")
         if not is_valid_answer(max_prob_letter):
-            logging.warning(f"Invalid answer predicted: '{max_prob_letter}' for question: '{question[:50]}...'")
+            logging.warning(f"Invalid answer predicted at index {question_index}: '{max_prob_letter}' for question: '{question[:50]}...'")
             return "Error", answer_probs
 
         return max_prob_letter, answer_probs
 
     except Exception as e:
-        logging.error(f"Error processing question: {e}")
+        logging.error(f"Error processing question at index {question_index} '{question[:50]}...': {str(e)}\n{traceback.format_exc()}")
         return "Error", {}
 
 def main():
@@ -81,9 +89,8 @@ def main():
     output_dir = args.output_dir
     max_retries = args.max_retries
     difficulty = args.difficulty
-    full_question_col = args.full_question_col  # New argument for column name
+    full_question_col = args.full_question_col
 
-    # Validation: Ensure difficulty is only specified for academic_opinion
     if difficulty and not (question_style == "prefix_and_opinion" and prefix_type == "academic"):
         raise ValueError("The --difficulty argument is only applicable when question_style='prefix_and_opinion' "
                          "and prefix_type='academic'.")
@@ -101,36 +108,58 @@ def main():
 
     try:
         print("Loading tokenizer...")
+        logging.info("Loading tokenizer...")
         tokenizer = AutoTokenizer.from_pretrained(model_name, token=hf_token, trust_remote_code=True)
 
         print("Loading model...")
+        logging.info("Loading model...")
         model = AutoModelForCausalLM.from_pretrained(model_name, token=hf_token, trust_remote_code=True)
         model = model.to(device)
         model.eval()
 
-        # Load the pre-constructed DataFrame
+        print(f"Loading DataFrame from {input_filename}...")
+        logging.info(f"Loading DataFrame from {input_filename}...")
         df = pd.read_pickle(input_filename)
         print(f"Loaded DataFrame with {len(df)} entries from {input_filename}.")
         logging.info(f"Loaded DataFrame with {len(df)} entries from {input_filename}.")
+        print(f"DataFrame index: {df.index}")
+        logging.info(f"DataFrame index: {df.index}")
 
-        # Check if the specified full_question column exists
         if full_question_col not in df.columns:
             raise ValueError(f"Input DataFrame '{input_filename}' must contain a '{full_question_col}' column.")
+
+        print(f"Validating '{full_question_col}' column contents...")
+        logging.info(f"Validating '{full_question_col}' column contents...")
+        invalid_questions = df[full_question_col].apply(lambda x: not isinstance(x, str) or not x.strip())
+        if invalid_questions.any():
+            invalid_indices = invalid_questions[invalid_questions].index.tolist()
+            invalid_samples = df.loc[invalid_indices, full_question_col].head().to_dict()
+            raise ValueError(f"Found {len(invalid_indices)} invalid questions in '{full_question_col}' column (must be non-empty strings). First few: {invalid_samples}")
 
         if "model_answer" not in df.columns:
             df["model_answer"] = None
         if "answer_probs" not in df.columns:
             df["answer_probs"] = None
 
-        # Process each question using the specified column
-        questions = df[full_question_col].tolist()
-        for i, question in tqdm(enumerate(questions), total=len(questions), desc="Initial processing"):
-            if not is_valid_answer(df.at[i, "model_answer"]):
-                answer, probs = process_question(question, tokenizer, model, device)
-                df.at[i, "model_answer"] = answer
-                df.at[i, "answer_probs"] = probs
+        print("Testing with the first 5 questions...")
+        logging.info("Testing with the first 5 questions...")
+        for idx in df.index[:5]:
+            question = df.at[idx, full_question_col]
+            answer, probs = process_question(question, tokenizer, model, device, idx)
+            print(f"Test question at index {idx}: Answer = {answer}, Probabilities = {probs}")
+            logging.info(f"Test question at index {idx}: Answer = {answer}, Probabilities = {probs}")
+            torch.cuda.empty_cache()
 
-        # Retry loop for invalid answers
+        print("Processing all questions...")
+        logging.info("Processing all questions...")
+        for idx in tqdm(df.index, total=len(df), desc="Initial processing"):
+            if not is_valid_answer(df.at[idx, "model_answer"]):
+                question = df.at[idx, full_question_col]
+                answer, probs = process_question(question, tokenizer, model, device, idx)
+                df.at[idx, "model_answer"] = answer
+                df.at[idx, "answer_probs"] = probs
+                torch.cuda.empty_cache()
+
         retry_count = 0
         while retry_count < max_retries:
             invalid_indices = df.index[
@@ -148,19 +177,18 @@ def main():
             print(f"Retry {retry_count + 1}/{max_retries}: Found {len(invalid_indices)} entries with invalid answers.")
             logging.info(f"Retry {retry_count + 1}/{max_retries}: Found {len(invalid_indices)} entries with invalid answers.")
             for idx in tqdm(invalid_indices, desc=f"Retry {retry_count + 1}"):
-                question = df.at[idx, full_question_col]  # Use the specified column
-                answer, probs = process_question(question, tokenizer, model, device)
+                question = df.at[idx, full_question_col]
+                answer, probs = process_question(question, tokenizer, model, device, idx)
                 df.at[idx, "model_answer"] = answer
                 df.at[idx, "answer_probs"] = probs
+                torch.cuda.empty_cache()
 
             retry_count += 1
             time.sleep(1)
 
-        # Extract dataset name from input filename (e.g., 'mmlu' from 'mmlu_plain.pkl')
-        input_base = os.path.splitext(os.path.basename(input_filename))[0]  # e.g., 'mmlu_plain'
-        dataset_name = input_base.split('_')[0]  # e.g., 'mmlu'
+        input_base = os.path.splitext(os.path.basename(input_filename))[0]
+        dataset_name = input_base.split('_')[0]
 
-        # Define output filename using dataset_name
         model_short_name = model_name.split("/")[-1].replace(".", "_")
         timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
         if question_style == "prefix_and_opinion":
@@ -170,10 +198,9 @@ def main():
                 output_filename = f"{output_dir}/{dataset_name}_{prefix_type}_opinion_out_{model_short_name}_{timestamp_str}.pkl"
         elif question_style == "opinion_only":
             output_filename = f"{output_dir}/{dataset_name}_opinion_only_out_{model_short_name}_{timestamp_str}.pkl"
-        else:  # plain
+        else:
             output_filename = f"{output_dir}/{dataset_name}_plain_out_{model_short_name}_{timestamp_str}.pkl"
 
-        # Check for invalid answers and save regardless
         invalid_count = len(df[
             df["model_answer"].isna() |
             (df["model_answer"] == "") |
@@ -187,14 +214,17 @@ def main():
             print("All entries successfully populated with valid answers!")
             logging.info("All entries successfully populated with valid answers!")
 
+        os.makedirs(output_dir, exist_ok=True)
+        print(f"Saving to {output_filename}...")
+        logging.info(f"Saving to {output_filename}...")
         df.to_pickle(output_filename)
         print(f"Completed and saved to {output_filename} with {len(df)} rows!")
         logging.info(f"Completed and saved to {output_filename} with {len(df)} rows!")
 
     except Exception as e:
-        print(f"An error occurred: {str(e)}")
-        logging.error(f"An error occurred: {str(e)}")
-        print("Please check your model, tokenizer, or environment.")
+        print(f"An error occurred: {str(e)}\n{traceback.format_exc()}")
+        logging.error(f"An error occurred: {str(e)}\n{traceback.format_exc()}")
+        raise
 
     finally:
         torch.cuda.empty_cache()
