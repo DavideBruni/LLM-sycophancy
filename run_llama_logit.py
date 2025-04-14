@@ -27,6 +27,10 @@ def parse_args():
                         help="Input .pkl file with pre-constructed questions")
     parser.add_argument("--output_dir", type=str, default="output/mmlupro", help="Output directory")
     parser.add_argument("--max_retries", type=int, default=3, help="Maximum number of retries for invalid answers")
+    parser.add_argument("--difficulty", type=str, default="", 
+                        choices=["", "beginner", "intermediate", "expert"], 
+                        help="Difficulty level for academic_opinion style (beginner, intermediate, expert). "
+                             "Only applies when question_style='prefix_and_opinion' and prefix_type='academic'.")
     parser.add_argument("--full_question_col", type=str, default="full_question", 
                         help="Name of the column in the input DataFrame containing the full question text")
     return parser.parse_args()
@@ -35,7 +39,7 @@ def is_valid_answer(answer):
     """Check if the answer is a single uppercase letter."""
     return isinstance(answer, str) and len(answer) == 1 and answer.isupper() and answer.isalpha()
 
-def process_question(question, tokenizer, model, device, max_new_tokens=1, temperature=0.0):
+def process_question(question, tokenizer, model, device):
     """Process a single question, return the model's answer and probabilities for A, B, C, D."""
     try:
         prompt = f"Question: ||{question}||\nRespond with exactly one uppercase letter (A, B, C, D, etc.) and nothing else.\nAnswer:"
@@ -43,39 +47,26 @@ def process_question(question, tokenizer, model, device, max_new_tokens=1, tempe
         inputs = {key: value.to(device) for key, value in inputs.items()}
 
         with torch.no_grad():
-            generated_output = model.generate(
-                **inputs,
-                max_new_tokens=max_new_tokens,
-                temperature=temperature,
-                return_dict_in_generate=True,
-                output_scores=True,
-                do_sample=False,
-                pad_token_id=tokenizer.eos_token_id
-            )
-
-        generated_token = generated_output.sequences[0][inputs['input_ids'].shape[-1]:]
-        generated_text = tokenizer.decode(generated_token, skip_special_tokens=True).strip()
-
-        if generated_text and generated_text[0].isupper() and generated_text[0].isalpha():
-            result = generated_text[0]
-        else:
-            result = generated_text if is_valid_answer(generated_text) else ""
-
-        if not is_valid_answer(result):
-            logging.warning(f"Invalid output for question: '{question[:50]}...'. Generated: '{generated_text}'")
-
-        logits = generated_output.scores[0]
-        probs = torch.softmax(logits, dim=-1)
+            outputs = model(**inputs)
+        
+        logits = outputs.logits
+        last_token_logits = logits[0, -1]
+        probs = torch.softmax(last_token_logits, dim=-1)
 
         answer_tokens = {letter: tokenizer.encode(letter, add_special_tokens=False)[0] for letter in 'ABCD'}
         answer_probs = {}
         for letter, token_id in answer_tokens.items():
             try:
-                answer_probs[letter] = probs[0, token_id].item()
+                answer_probs[letter] = probs[token_id].item()
             except IndexError:
                 answer_probs[letter] = 0.0
 
-        return result, answer_probs
+        max_prob_letter = max(answer_probs, key=answer_probs.get)
+        if not is_valid_answer(max_prob_letter):
+            logging.warning(f"Invalid answer predicted: '{max_prob_letter}' for question: '{question[:50]}...'")
+            return "Error", answer_probs
+
+        return max_prob_letter, answer_probs
 
     except Exception as e:
         logging.error(f"Error processing question: {e}")
@@ -89,7 +80,13 @@ def main():
     input_filename = args.input_filename
     output_dir = args.output_dir
     max_retries = args.max_retries
+    difficulty = args.difficulty
     full_question_col = args.full_question_col  # New argument for column name
+
+    # Validation: Ensure difficulty is only specified for academic_opinion
+    if difficulty and not (question_style == "prefix_and_opinion" and prefix_type == "academic"):
+        raise ValueError("The --difficulty argument is only applicable when question_style='prefix_and_opinion' "
+                         "and prefix_type='academic'.")
 
     if question_style == "prefix_and_opinion" and not prefix_type:
         raise ValueError("For 'prefix_and_opinion' question_style, a prefix_type (e.g., 'academic' or 'behavior') must be specified.")
@@ -159,19 +156,24 @@ def main():
             retry_count += 1
             time.sleep(1)
 
-        # Define output filename
+        # Extract dataset name from input filename (e.g., 'mmlu' from 'mmlu_plain.pkl')
+        input_base = os.path.splitext(os.path.basename(input_filename))[0]  # e.g., 'mmlu_plain'
+        dataset_name = input_base.split('_')[0]  # e.g., 'mmlu'
+
+        # Define output filename using dataset_name
         model_short_name = model_name.split("/")[-1].replace(".", "_")
         timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-        input_base = os.path.splitext(os.path.basename(input_filename))[0]
-        dataset_name = input_base.split('_')[0]
         if question_style == "prefix_and_opinion":
-            output_filename = f"{output_dir}/{dataset_name}_{prefix_type}_opinion_out_{model_short_name}_{timestamp_str}.pkl"
+            if prefix_type == "academic" and difficulty:
+                output_filename = f"{output_dir}/{dataset_name}_{prefix_type}_opinion_{difficulty}_out_{model_short_name}_{timestamp_str}.pkl"
+            else:
+                output_filename = f"{output_dir}/{dataset_name}_{prefix_type}_opinion_out_{model_short_name}_{timestamp_str}.pkl"
         elif question_style == "opinion_only":
             output_filename = f"{output_dir}/{dataset_name}_opinion_only_out_{model_short_name}_{timestamp_str}.pkl"
-        else:
+        else:  # plain
             output_filename = f"{output_dir}/{dataset_name}_plain_out_{model_short_name}_{timestamp_str}.pkl"
 
-        # Check for invalid answers and save
+        # Check for invalid answers and save regardless
         invalid_count = len(df[
             df["model_answer"].isna() |
             (df["model_answer"] == "") |

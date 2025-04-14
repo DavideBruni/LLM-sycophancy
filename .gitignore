@@ -7,3 +7,5 @@ logs/
 
 output/mmlupro/**/*_out_*.pkl
 inference.log
+
+archive/logit_test.py
