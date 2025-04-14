@@ -10,7 +10,7 @@ import logging
 import os
 
 # Set up logging
-logging.basicConfig(filename='inference.log', level=logging.INFO,
+logging.basicConfig(filename='inference_logit.log', level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s')
 
 def parse_args():
