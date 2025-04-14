@@ -22,15 +22,15 @@ fi
 # set huggingface cache dir
 export HF_HOME="/ibex/user/wangk0e/cache/huggingface"
 
-python run_llama.py \
+python run_llama_logit.py \
   --model_name "$MODEL_NAME" \
   --prefix_type "" \
   --difficulty "" \
-  --question_style "plain" \
-  --input_filename "prefix_full_question/mmlu_sample/mmlu_subset.pkl" \
-  --output_dir "output/mmlu/logit" \
+  --question_style "opinion_only" \
+  --input_filename "prefix_full_question/mmlu/mmlu_opinion_only.pkl" \
+  --output_dir "output/mmlu/logit_full" \
   --max_retries 1 \
-  --full_question_col "full_question_plain"
+  --full_question_col "full_question"
 
 deactivate
 
