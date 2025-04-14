@@ -24,11 +24,13 @@ export HF_HOME="/ibex/user/wangk0e/cache/huggingface"
 
 python run_llama.py \
   --model_name "$MODEL_NAME" \
-  --prefix_type "academic" \
-  --question_style "prefix_and_opinion" \
-  --input_filename "output/mmlu/mmlu_academic_opinion_beginner.pkl" \
-  --output_dir "output/mmlu" \
-  --max_retries 1
+  --prefix_type "" \
+  --difficulty "" \
+  --question_style "plain" \
+  --input_filename "prefix_full_question/mmlu_sample/mmlu_subset.pkl" \
+  --output_dir "output/mmlu/logit" \
+  --max_retries 1 \
+  --full_question_col "full_question_plain"
 
 deactivate
 
