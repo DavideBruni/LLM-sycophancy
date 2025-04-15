@@ -27,6 +27,10 @@ def parse_args():
                         help="Input .pkl file with pre-constructed questions")
     parser.add_argument("--output_dir", type=str, default="output/mmlupro", help="Output directory")
     parser.add_argument("--max_retries", type=int, default=3, help="Maximum number of retries for invalid answers")
+    parser.add_argument("--difficulty", type=str, default="", 
+                        choices=["", "beginner", "intermediate", "expert"], 
+                        help="Difficulty level for academic_opinion style (beginner, intermediate, expert). "
+                             "Only applies when question_style='prefix_and_opinion' and prefix_type='academic'.")
     return parser.parse_args()
 
 def is_valid_answer(answer):
@@ -73,6 +77,12 @@ def main():
     input_filename = args.input_filename
     output_dir = args.output_dir
     max_retries = args.max_retries
+    difficulty = args.difficulty
+
+    # Validation: Ensure difficulty is only specified for academic_opinion
+    if difficulty and not (question_style == "prefix_and_opinion" and prefix_type == "academic"):
+        raise ValueError("The --difficulty argument is only applicable when question_style='prefix_and_opinion' "
+                         "and prefix_type='academic'.")
 
     if question_style == "prefix_and_opinion" and not prefix_type:
         raise ValueError("For 'prefix_and_opinion' question_style, a prefix_type (e.g., 'academic' or 'behavior') must be specified.")
@@ -145,7 +155,10 @@ def main():
         model_short_name = model_name.split("/")[-1].replace(".", "_")
         timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
         if question_style == "prefix_and_opinion":
-            output_filename = f"{output_dir}/{dataset_name}_{prefix_type}_opinion_out_{model_short_name}_{timestamp_str}.pkl"
+            if prefix_type == "academic" and difficulty:
+                output_filename = f"{output_dir}/{dataset_name}_{prefix_type}_opinion_{difficulty}_out_{model_short_name}_{timestamp_str}.pkl"
+            else:
+                output_filename = f"{output_dir}/{dataset_name}_{prefix_type}_opinion_out_{model_short_name}_{timestamp_str}.pkl"
         elif question_style == "opinion_only":
             output_filename = f"{output_dir}/{dataset_name}_opinion_only_out_{model_short_name}_{timestamp_str}.pkl"
         else:  # plain
