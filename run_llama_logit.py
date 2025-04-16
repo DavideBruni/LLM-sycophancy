@@ -41,7 +41,7 @@ def is_valid_answer(answer):
     return isinstance(answer, str) and len(answer) == 1 and answer.isupper() and answer.isalpha()
 
 def process_question(question, tokenizer, model, device, question_index):
-    """Process a single question, return the model's answer and probabilities for A, B, C, D."""
+    """Process a single question, return the model's answer, raw logits for A, B, C, D, and top 10 logits."""
     try:
         logging.debug(f"Processing question at index {question_index}: '{question[:50]}...'")
         if not isinstance(question, str) or not question.strip():
@@ -58,9 +58,25 @@ def process_question(question, tokenizer, model, device, question_index):
         logits = outputs.logits
         logging.debug(f"Logits shape: {logits.shape}")
         last_token_logits = logits[0, -1]
-        probs = torch.softmax(last_token_logits, dim=-1)
 
+        # Extract raw logits for A, B, C, D
         answer_tokens = {letter: tokenizer.encode(letter, add_special_tokens=False)[0] for letter in 'ABCD'}
+        logging.debug(f"Answer token IDs: {answer_tokens}")
+        for letter, token_id in answer_tokens.items():
+            decoded = tokenizer.decode(token_id)
+            logging.debug(f"Token ID {token_id} decodes to: '{decoded}'")
+
+        answer_logits = {}
+        for letter, token_id in answer_tokens.items():
+            try:
+                answer_logits[letter] = last_token_logits[token_id].item()
+            except IndexError:
+                answer_logits[letter] = 0.0
+
+        logging.debug(f"Raw logits for A, B, C, D: {answer_logits}")
+
+        # To determine the answer, compute softmax probabilities for A, B, C, D only
+        probs = torch.softmax(last_token_logits, dim=-1)
         answer_probs = {}
         for letter, token_id in answer_tokens.items():
             try:
@@ -68,17 +84,54 @@ def process_question(question, tokenizer, model, device, question_index):
             except IndexError:
                 answer_probs[letter] = 0.0
 
+        # Renormalize probabilities to sum to 1 across A, B, C, D
+        total_prob = sum(answer_probs.values())
+        if total_prob > 0:
+            answer_probs = {letter: prob / total_prob for letter, prob in answer_probs.items()}
+        else:
+            answer_probs = {letter: 0.25 for letter in 'ABCD'}
+
         max_prob_letter = max(answer_probs, key=answer_probs.get)
-        logging.debug(f"Predicted answer: {max_prob_letter}, Probabilities: {answer_probs}")
+        logging.debug(f"Predicted answer: {max_prob_letter}, Probabilities (for answer selection): {answer_probs}")
+
+        # Extract top 10 logits (excluding A, B, C, D)
+        answer_token_ids = set(answer_tokens.values())
+        # Get indices of top 10 logits
+        top_k_values, top_k_indices = torch.topk(last_token_logits, k=10)
+        top_10_logits = {}
+        for idx, value in zip(top_k_indices, top_k_values):
+            token_id = idx.item()
+            if token_id in answer_token_ids:
+                continue  # Skip A, B, C, D
+            token = tokenizer.decode(token_id)
+            top_10_logits[token] = value.item()
+            # Limit to 10 entries (excluding A, B, C, D)
+            if len(top_10_logits) >= 10:
+                break
+            # If we skipped some entries, continue to find more
+            remaining = 10 - len(top_10_logits)
+            if remaining > 0:
+                _, extra_indices = torch.topk(last_token_logits, k=10 + len(answer_token_ids))
+                for extra_idx in extra_indices[len(top_10_logits) + len(answer_token_ids):]:
+                    token_id = extra_idx.item()
+                    if token_id in answer_token_ids:
+                        continue
+                    token = tokenizer.decode(token_id)
+                    top_10_logits[token] = last_token_logits[token_id].item()
+                    if len(top_10_logits) >= 10:
+                        break
+
+        logging.debug(f"Top 10 logits (excluding A, B, C, D): {top_10_logits}")
+
         if not is_valid_answer(max_prob_letter):
             logging.warning(f"Invalid answer predicted at index {question_index}: '{max_prob_letter}' for question: '{question[:50]}...'")
-            return "Error", answer_probs
+            return "Error", answer_logits, top_10_logits
 
-        return max_prob_letter, answer_probs
+        return max_prob_letter, answer_logits, top_10_logits
 
     except Exception as e:
         logging.error(f"Error processing question at index {question_index} '{question[:50]}...': {str(e)}\n{traceback.format_exc()}")
-        return "Error", {}
+        return "Error", {}, {}
 
 def main():
     args = parse_args()
@@ -124,6 +177,10 @@ def main():
         logging.info(f"Loaded DataFrame with {len(df)} entries from {input_filename}.")
         print(f"DataFrame index: {df.index}")
         logging.info(f"DataFrame index: {df.index}")
+        print(f"DataFrame columns: {df.columns}")
+        logging.info(f"DataFrame columns: {df.columns}")
+        print("First few rows:\n", df.head())
+        logging.info(f"First few rows:\n{df.head()}")
 
         if full_question_col not in df.columns:
             raise ValueError(f"Input DataFrame '{input_filename}' must contain a '{full_question_col}' column.")
@@ -138,16 +195,18 @@ def main():
 
         if "model_answer" not in df.columns:
             df["model_answer"] = None
-        if "answer_probs" not in df.columns:
-            df["answer_probs"] = None
+        if "answer_logits" not in df.columns:  # Renamed from answer_probs to answer_logits
+            df["answer_logits"] = None
+        if "top_10_logits" not in df.columns:
+            df["top_10_logits"] = None
 
         print("Testing with the first 5 questions...")
         logging.info("Testing with the first 5 questions...")
         for idx in df.index[:5]:
             question = df.at[idx, full_question_col]
-            answer, probs = process_question(question, tokenizer, model, device, idx)
-            print(f"Test question at index {idx}: Answer = {answer}, Probabilities = {probs}")
-            logging.info(f"Test question at index {idx}: Answer = {answer}, Probabilities = {probs}")
+            answer, logits, top_10 = process_question(question, tokenizer, model, device, idx)
+            print(f"Test question at index {idx}: Answer = {answer}, Logits for A, B, C, D = {logits}, Top 10 Logits = {top_10}")
+            logging.info(f"Test question at index {idx}: Answer = {answer}, Logits for A, B, C, D = {logits}, Top 10 Logits = {top_10}")
             torch.cuda.empty_cache()
 
         print("Processing all questions...")
@@ -155,9 +214,10 @@ def main():
         for idx in tqdm(df.index, total=len(df), desc="Initial processing"):
             if not is_valid_answer(df.at[idx, "model_answer"]):
                 question = df.at[idx, full_question_col]
-                answer, probs = process_question(question, tokenizer, model, device, idx)
+                answer, logits, top_10 = process_question(question, tokenizer, model, device, idx)
                 df.at[idx, "model_answer"] = answer
-                df.at[idx, "answer_probs"] = probs
+                df.at[idx, "answer_logits"] = logits
+                df.at[idx, "top_10_logits"] = top_10
                 torch.cuda.empty_cache()
 
         retry_count = 0
@@ -178,9 +238,10 @@ def main():
             logging.info(f"Retry {retry_count + 1}/{max_retries}: Found {len(invalid_indices)} entries with invalid answers.")
             for idx in tqdm(invalid_indices, desc=f"Retry {retry_count + 1}"):
                 question = df.at[idx, full_question_col]
-                answer, probs = process_question(question, tokenizer, model, device, idx)
+                answer, logits, top_10 = process_question(question, tokenizer, model, device, idx)
                 df.at[idx, "model_answer"] = answer
-                df.at[idx, "answer_probs"] = probs
+                df.at[idx, "answer_logits"] = logits
+                df.at[idx, "top_10_logits"] = top_10
                 torch.cuda.empty_cache()
 
             retry_count += 1
