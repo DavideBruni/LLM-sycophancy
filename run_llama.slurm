@@ -13,8 +13,8 @@ source ~/syco/bin/activate
 
 # Default values
 DEFAULT_MODEL="meta-llama/Llama-3.2-3B"
-INPUT_FILENAME="prefix_full_question/mmlu_sample/mmlu_subset.pkl"  # Updated to match your error message
-FULL_QUESTION_COL="full_question_plain"
+INPUT_FILENAME="prefix_full_question/mmlu_opinion_only.pkl"  # Updated to match your error message
+FULL_QUESTION_COL="full_question"
 DIFFICULTY=""
 
 

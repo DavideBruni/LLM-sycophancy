@@ -1,11 +1,11 @@
 #!/bin/bash
-#SBATCH --job-name=run_llama_job_8b
+#SBATCH --job-name=run_llama_logit_job
 #SBATCH --time=24:00:00
 #SBATCH --cpus-per-task=8
 #SBATCH --gres=gpu:a100:1
 #SBATCH --mem=80G
-#SBATCH --output=./logs/run_llama/%j.out
-#SBATCH --error=./logs/run_llama/%j.err
+#SBATCH --output=./logs/run_llama_logit/%j.out
+#SBATCH --error=./logs/run_llama_logit/%j.err
 
 set -e
 
@@ -26,9 +26,9 @@ python run_llama_logit.py \
   --model_name "$MODEL_NAME" \
   --prefix_type "" \
   --difficulty "" \
-  --question_style "opinion_only" \
-  --input_filename "prefix_full_question/mmlu/mmlu_opinion_only.pkl" \
-  --output_dir "output/mmlu/logit_full" \
+  --question_style "plain" \
+  --input_filename "prefix_full_question/mmlu/mmlu_plain.pkl" \
+  --output_dir "output/mmlu/logit_redo_full" \
   --max_retries 1 \
   --full_question_col "full_question"
 
