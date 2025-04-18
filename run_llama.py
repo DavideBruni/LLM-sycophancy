@@ -16,21 +16,26 @@ logging.basicConfig(filename='inference.log', level=logging.INFO,
 def parse_args():
     parser = argparse.ArgumentParser(description="Run LLaMA inference on a dataset with pre-constructed questions.")
     parser.add_argument("--model_name", type=str, default="meta-llama/Llama-3.2-1B", help="Model name for inference")
+    parser.add_argument("--dataset", type=str, default="mmlu", choices=["mmlu"], help="Dataset to use (currently only 'mmlu' supported)")
     parser.add_argument("--prefix_type", type=str, default="", 
-                        choices=["academic", "behavior", ""], 
-                        help="Type of prefix used (e.g., 'academic', 'behavior'), or '' for no prefix.")
-    parser.add_argument("--question_style", type=str, default="plain", 
+                        choices=["", "academic", "behavior"], 
+                        help="Type of prefix used (e.g., 'academic', 'behavior').")
+    parser.add_argument("--academic_level", type=str, default="", 
+                        choices=["", "beginner", "intermediate", "advanced"], 
+                        help="Academic level for academic prefix (beginner, intermediate, advanced). "
+                             "Only applies when prefix_type='academic'.")
+    parser.add_argument("--prefix_subtype", type=str, default="original", 
+                        choices=["", "original", "mixing_subject", "third_pov"], 
+                        help="Subtype of prefix (original, mixing_subject, third_pov).")
+    parser.add_argument("--question_type", type=str, default="plain", 
                         choices=["prefix_and_opinion", "opinion_only", "plain"], 
-                        help="Style of the questions: 'prefix_and_opinion' (prefix + opinion), "
+                        help="Type of the questions: 'prefix_and_opinion' (prefix + opinion), "
                              "'opinion_only' (just opinion), or 'plain' (no prefix or opinion).")
-    parser.add_argument("--input_filename", type=str, default="output/mmlupro/mmlupro_plain.pkl", 
+    parser.add_argument("--input_filename", type=str, default="output/mmlu/mmlu_plain.pkl", 
                         help="Input .pkl file with pre-constructed questions")
-    parser.add_argument("--output_dir", type=str, default="output/mmlupro", help="Output directory")
+    parser.add_argument("--full_question_column", type=str, default="full_question",
+                        help="Name of the column containing the full question text in the input DataFrame")
     parser.add_argument("--max_retries", type=int, default=3, help="Maximum number of retries for invalid answers")
-    parser.add_argument("--difficulty", type=str, default="", 
-                        choices=["", "beginner", "intermediate", "expert"], 
-                        help="Difficulty level for academic_opinion style (beginner, intermediate, expert). "
-                             "Only applies when question_style='prefix_and_opinion' and prefix_type='academic'.")
     return parser.parse_args()
 
 def is_valid_answer(answer):
@@ -72,20 +77,21 @@ def process_question(question, tokenizer, model, device):
 def main():
     args = parse_args()
     model_name = args.model_name
+    dataset = args.dataset
     prefix_type = args.prefix_type
-    question_style = args.question_style
+    academic_level = args.academic_level
+    prefix_subtype = args.prefix_subtype
+    question_type = args.question_type
     input_filename = args.input_filename
-    output_dir = args.output_dir
+    full_question_column = args.full_question_column
     max_retries = args.max_retries
-    difficulty = args.difficulty
 
-    # Validation: Ensure difficulty is only specified for academic_opinion
-    if difficulty and not (question_style == "prefix_and_opinion" and prefix_type == "academic"):
-        raise ValueError("The --difficulty argument is only applicable when question_style='prefix_and_opinion' "
-                         "and prefix_type='academic'.")
+    # Validation: Ensure academic_level is only specified for academic prefix
+    if academic_level and prefix_type != "academic":
+        raise ValueError("The --academic_level argument is only applicable when prefix_type='academic'.")
 
-    if question_style == "prefix_and_opinion" and not prefix_type:
-        raise ValueError("For 'prefix_and_opinion' question_style, a prefix_type (e.g., 'academic' or 'behavior') must be specified.")
+    if question_type == "prefix_and_opinion" and not prefix_type:
+        raise ValueError("For 'prefix_and_opinion' question_type, a prefix_type (e.g., 'academic' or 'behavior') must be specified.")
 
     hf_token = config.HF_TOKEN
     if not hf_token:
@@ -109,14 +115,14 @@ def main():
         print(f"Loaded DataFrame with {len(df)} entries from {input_filename}.")
         logging.info(f"Loaded DataFrame with {len(df)} entries from {input_filename}.")
 
-        if "full_question" not in df.columns:
-            raise ValueError(f"Input DataFrame '{input_filename}' must contain a 'full_question' column.")
+        if full_question_column not in df.columns:
+            raise ValueError(f"Input DataFrame '{input_filename}' must contain a '{full_question_column}' column.")
 
         if "model_answer" not in df.columns:
             df["model_answer"] = None
 
         # Process each question
-        questions = df["full_question"].tolist()
+        questions = df[full_question_column].tolist()
         for i, question in tqdm(enumerate(questions), total=len(questions), desc="Initial processing"):
             if not is_valid_answer(df.at[i, "model_answer"]):
                 answer = process_question(question, tokenizer, model, device)
@@ -140,29 +146,31 @@ def main():
             print(f"Retry {retry_count + 1}/{max_retries}: Found {len(invalid_indices)} entries with invalid answers.")
             logging.info(f"Retry {retry_count + 1}/{max_retries}: Found {len(invalid_indices)} entries with invalid answers.")
             for idx in tqdm(invalid_indices, desc=f"Retry {retry_count + 1}"):
-                question = df.at[idx, "full_question"]
+                question = df.at[idx, full_question_column]
                 answer = process_question(question, tokenizer, model, device)
                 df.at[idx, "model_answer"] = answer
 
             retry_count += 1
             time.sleep(1)
 
-        # Extract dataset name from input filename (e.g., 'mmlu' from 'mmlu_plain.pkl')
-        input_base = os.path.splitext(os.path.basename(input_filename))[0]  # e.g., 'mmlu_plain'
-        dataset_name = input_base.split('_')[0]  # e.g., 'mmlu'
+        # Construct output directory dynamically: output/{dataset}/{question_type}/{prefix_type}/{prefix_subtype}/{academic_level}
+        output_dir_parts = [f"output/{dataset}"]
+        if question_type:
+            output_dir_parts.append(question_type)
+        if prefix_type:
+            output_dir_parts.append(prefix_type)
+            output_dir_parts.append(prefix_subtype)
+            if prefix_type == "academic":
+                output_dir_parts.append(academic_level)
+        output_dir = os.path.join(*output_dir_parts)
 
-        # Define output filename using dataset_name
+        # Create output directory if it doesn't exist
+        os.makedirs(output_dir, exist_ok=True)
+
+        # Define output filename: model_name_DATETIME.pkl
         model_short_name = model_name.split("/")[-1].replace(".", "_")
         timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-        if question_style == "prefix_and_opinion":
-            if prefix_type == "academic" and difficulty:
-                output_filename = f"{output_dir}/{dataset_name}_{prefix_type}_opinion_{difficulty}_out_{model_short_name}_{timestamp_str}.pkl"
-            else:
-                output_filename = f"{output_dir}/{dataset_name}_{prefix_type}_opinion_out_{model_short_name}_{timestamp_str}.pkl"
-        elif question_style == "opinion_only":
-            output_filename = f"{output_dir}/{dataset_name}_opinion_only_out_{model_short_name}_{timestamp_str}.pkl"
-        else:  # plain
-            output_filename = f"{output_dir}/{dataset_name}_plain_out_{model_short_name}_{timestamp_str}.pkl"
+        output_filename = f"{output_dir}/{model_short_name}_{timestamp_str}.pkl"
 
         # Check for invalid answers and save regardless
         invalid_count = len(df[

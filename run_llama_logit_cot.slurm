@@ -1,9 +1,9 @@
 #!/bin/bash
-#SBATCH --job-name=run_llama_logit_cot_job
+#SBATCH --job-name=run_llama_logit_cot_job_v100
 #SBATCH --time=24:00:00
 #SBATCH --cpus-per-task=8
-#SBATCH --gres=gpu:a100:1
-#SBATCH --mem=200G
+#SBATCH --gres=gpu:v100:1 
+#SBATCH --mem=80G
 #SBATCH --output=./logs/run_llama_logit/%j.out
 #SBATCH --error=./logs/run_llama_logit/%j.err
 
@@ -26,11 +26,11 @@ python run_llama_logit_cot.py \
   --model_name "$MODEL_NAME" \
   --prefix_type "" \
   --difficulty "" \
-  --question_style "plain" \
+  --question_style "opinion_only" \
   --input_filename "prefix_full_question/mmlu_sample/mmlu_subset.pkl" \
   --output_dir "output/mmlu/logit_cot" \
   --max_retries 1 \
-  --full_question_col "full_question_plain"
+  --full_question_col "full_question_opinion"
 
 deactivate
 

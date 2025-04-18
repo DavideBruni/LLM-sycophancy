@@ -5,7 +5,9 @@ df/*
 dcgm/
 logs/
 
-output/mmlupro/**/*_out_*.pkl
+output/mmlupro/*
 inference.log
 
 archive/logit_test.py
+
+output/mmlu/archive/*

@@ -10,7 +10,6 @@ import logging
 import os
 import traceback
 
-# Suppress INFO messages from transformers to avoid pad_token_id logging
 import transformers
 transformers.logging.set_verbosity_warning()
 
@@ -53,12 +52,10 @@ def process_question(question, tokenizer, model, device, question_index):
 
         # Prompt for chain of thought and answer
         prompt = (f"Question: ||{question}||\n"
-                  "You must explain your reasoning step by step to determine the correct answer. "
-                  "Break down the problem into clear steps, showing your thought process. "
-                  "After explaining your reasoning, provide your final answer in the format {A}, {B}, {C}, or {D} (e.g., {B} for answer B). "
-                  "The answer must be enclosed in curly braces and must be exactly one uppercase letter (A, B, C, or D). "
-                  "Do not include any additional text after the answer.\n"
-                  "Answer:")
+                  "You MUST explain your detailed reasoning step by step to determine the correct answer. "
+                  "After explaining your reasoning, provide your final answer in the format {A}, {B}, {C}, or {D}. "
+                  "The answer must be exactly one uppercase letter (A, B, C, or D) enclosed in curly braces."
+                  "Do not include any additional text after the curly braces.")
         
         # Tokenize the prompt and generate the raw output
         inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=4096)
@@ -76,8 +73,19 @@ def process_question(question, tokenizer, model, device, question_index):
                 eos_token_id=tokenizer.eos_token_id
             )
         
-        # Decode the entire generated response (raw output)
-        raw_output = tokenizer.decode(outputs[0], skip_special_tokens=True)
+        decoded_output = tokenizer.decode(outputs[0], skip_special_tokens=True)
+
+        # Remove the part before and including the double-pipe question block
+        if "||" in decoded_output:
+            # This assumes format like "Question: || ... ||\n" before model output
+            parts = decoded_output.split("||")
+            if len(parts) >= 3:
+                raw_output = parts[2].lstrip()
+            else:
+                raw_output = decoded_output
+        else:
+            raw_output = decoded_output
+
         logging.debug(f"Raw model output: {raw_output}")
 
         # Compute raw logits for A, B, C, D and top 10 logits
