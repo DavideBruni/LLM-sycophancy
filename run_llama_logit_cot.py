@@ -22,14 +22,14 @@ def parse_args():
     parser.add_argument("--model_name", type=str, default="meta-llama/Llama-3.2-1B", help="Model name for inference")
     parser.add_argument("--dataset", type=str, default="mmlu", choices=["mmlu"], help="Dataset to use (currently only 'mmlu' supported)")
     parser.add_argument("--prefix_type", type=str, default="", 
-                        choices=["academic", "behavior"], 
+                        choices=["","academic", "behavior"], 
                         help="Type of prefix used (e.g., 'academic', 'behavior').")
-    parser.add_argument("--academic_level", type=str, default="beginner", 
-                        choices=["beginner", "intermediate", "advanced"], 
+    parser.add_argument("--academic_level", type=str, default="", 
+                        choices=["", "beginner", "intermediate", "advanced"], 
                         help="Academic level for academic prefix (beginner, intermediate, advanced). "
                              "Only applies when prefix_type='academic'.")
-    parser.add_argument("--prefix_subtype", type=str, default="original", 
-                        choices=["original", "mixing_subject", "third_pov"], 
+    parser.add_argument("--prefix_subtype", type=str, default="", 
+                        choices=["", "original", "mixing_subject", "third_pov"], 
                         help="Subtype of prefix (original, mixing_subject, third_pov).")
     parser.add_argument("--question_type", type=str, default="plain", 
                         choices=["prefix_and_opinion", "opinion_only", "plain"], 
