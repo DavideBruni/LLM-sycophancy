@@ -1,7 +1,9 @@
+# This script runs inference on a dataset using the vLLM library with LLaMA & Qwen models.
+
 import torch
 import pandas as pd
 import config
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from vllm import LLM, SamplingParams
 from tqdm import tqdm
 import time
 from datetime import datetime
@@ -9,27 +11,26 @@ import argparse
 import logging
 import os
 import traceback
-
-import transformers
-transformers.logging.set_verbosity_warning()
+from transformers import AutoTokenizer  # Used only for token ID mapping
+import torch.distributed as dist
 
 # Set up logging for the script
 logging.basicConfig(filename='inference.log', level=logging.DEBUG,
                     format='%(asctime)s - %(levelname)s - %(message)s')
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Run LLaMA inference with chain-of-thought and logit computation on a dataset.")
-    parser.add_argument("--model_name", type=str, default="meta-llama/Llama-3.2-1B", help="Model name for inference")
+    parser = argparse.ArgumentParser(description="Run LLaMA inference with chain-of-thought and/or logit computation using vLLM.")
+    parser.add_argument("--model_name", type=str, default="meta-llama/Llama-3.2-1B", help="Model name for inference (must be vLLM-compatible)")
     parser.add_argument("--dataset", type=str, default="mmlu", choices=["mmlu"], help="Dataset to use (currently only 'mmlu' supported)")
     parser.add_argument("--prefix_type", type=str, default="", 
-                        choices=["academic", "behavior"], 
+                        choices=["academic", "behavior", ""], 
                         help="Type of prefix used (e.g., 'academic', 'behavior').")
-    parser.add_argument("--academic_level", type=str, default="beginner", 
-                        choices=["beginner", "intermediate", "advanced"], 
+    parser.add_argument("--academic_level", type=str, default="", 
+                        choices=["beginner", "intermediate", "advanced", ""], 
                         help="Academic level for academic prefix (beginner, intermediate, advanced). "
                              "Only applies when prefix_type='academic'.")
-    parser.add_argument("--prefix_subtype", type=str, default="original", 
-                        choices=["original", "mixing_subject", "third_pov"], 
+    parser.add_argument("--prefix_subtype", type=str, default="", 
+                        choices=["original", "mixing_subject", "third_pov", ""], 
                         help="Subtype of prefix (original, mixing_subject, third_pov).")
     parser.add_argument("--question_type", type=str, default="plain", 
                         choices=["prefix_and_opinion", "opinion_only", "plain"], 
@@ -39,6 +40,10 @@ def parse_args():
                         help="Input .pkl file with pre-constructed questions")
     parser.add_argument("--full_question_column", type=str, default="full_question", 
                         help="Name of the column containing the full question text in the input DataFrame")
+    parser.add_argument("--inference_mode", type=str, default="logit_and_cot", 
+                        choices=["logit_only", "logit_and_cot"], 
+                        help="Inference mode: 'logit_only' for logit-based answer selection only, "
+                             "'logit_and_cot' for chain-of-thought generation and logit-based selection.")
     parser.add_argument("--max_retries", type=int, default=3, help="Maximum number of retries for invalid answers")
     return parser.parse_args()
 
@@ -46,103 +51,114 @@ def is_valid_answer(answer):
     """Check if the answer is a single uppercase letter."""
     return isinstance(answer, str) and len(answer) == 1 and answer.isupper() and answer.isalpha()
 
-def process_question(question, tokenizer, model, device, question_index):
+def process_question(question, tokenizer, llm, sampling_params_cot, sampling_params_logit, inference_mode, question_index):
     """Process a single question, return the raw output, answer based on logits, raw logits for A, B, C, D, and top 10 logits."""
     try:
         logging.debug(f"Processing question at index {question_index}: '{question[:50]}...'")
         if not isinstance(question, str) or not question.strip():
             raise ValueError(f"Invalid question at index {question_index}: must be a non-empty string, got '{question}'")
 
-        # Prompt for chain of thought and answer
-        prompt = (f"Question: ||{question}||\n"
-                  "You MUST explain your detailed reasoning step by step to determine the correct answer. "
-                  "After explaining your reasoning, provide your final answer in the format {A}, {B}, {C}, or {D}. "
-                  "The answer must be exactly one uppercase letter (A, B, C, or D) enclosed in curly braces."
-                  "Do not include any additional text after the curly braces.")
-        
-        # Tokenize the prompt and generate the raw output
-        inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=4096)
-        inputs = {key: value.to(device) for key, value in inputs.items()}
+        # Set prompt based on inference mode
+        if inference_mode == "logit_and_cot":
+            prompt = (f"Question: ||{question}||\n"
+                      "You MUST explain your detailed reasoning step by step to determine the correct answer. "
+                      "After explaining your reasoning, provide your final answer in the format {A}, {B}, {C}, or {D}. "
+                      "The answer must be exactly one uppercase letter (A, B, C, D) enclosed in curly braces. "
+                      "Do not include any additional text after the curly braces.")
+        else:  # logit_only
+            prompt = f"Question: ||{question}||\nRespond with exactly one uppercase letter (A, B, C, D) and nothing else.\nAnswer:"
 
-        logging.debug(f"Input IDs shape: {inputs['input_ids'].shape}")
-        with torch.no_grad():
-            # Generate the response with a reasonable max length
-            outputs = model.generate(
-                **inputs,
-                max_new_tokens=512,
-                do_sample=False,
-                top_p=None,
-                pad_token_id=tokenizer.pad_token_id,
-                eos_token_id=tokenizer.eos_token_id
-            )
-        
-        decoded_output = tokenizer.decode(outputs[0], skip_special_tokens=True)
-
-        # Remove the part before and including the double-pipe question block
-        if "||" in decoded_output:
-            # This assumes format like "Question: || ... ||\n" before model output
-            parts = decoded_output.split("||")
-            if len(parts) >= 3:
-                raw_output = parts[2].lstrip()
+        # Generate CoT output for logit_and_cot mode
+        raw_output = ""
+        if inference_mode == "logit_and_cot":
+            logging.info(f"Generating CoT for index {question_index}: {prompt[:100]}...")
+            outputs = llm.generate([prompt], sampling_params_cot,use_tqdm=False)
+            logging.info(f"vLLM CoT output for index {question_index}: {outputs}")
+            if outputs and outputs[0].outputs:
+                decoded_output = outputs[0].outputs[0].text
+                # Extract raw output after the double-pipe question block
+                if "||" in prompt:
+                    parts = (prompt + decoded_output).split("||")
+                    if len(parts) >= 3:
+                        raw_output = parts[2].lstrip()
+                    else:
+                        raw_output = decoded_output
+                else:
+                    raw_output = decoded_output
             else:
-                raw_output = decoded_output
-        else:
-            raw_output = decoded_output
+                raw_output = "No output generated"
+            logging.debug(f"Raw model output: {raw_output}")
 
-        logging.debug(f"Raw model output: {raw_output}")
+        # Compute logits for answer selection
+        sampling_params_logit.logprobs = 100  # Request top 100 logprobs for logit computation
+        logging.info(f"Generating logits for index {question_index}: {prompt[:100]}...")
+        outputs = llm.generate([prompt], sampling_params_logit, use_tqdm=False)
+        logging.info(f"vLLM logit output for index {question_index}: {outputs}")
+        if not outputs or not outputs[0].outputs:
+            logging.warning(f"No output generated for logits at index {question_index}")
+            return "Error", {}, "Error in processing", {}
 
-        # Compute raw logits for A, B, C, D and top 10 logits
-        inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=4096)
-        inputs = {key: value.to(device) for key, value in inputs.items()}
-        with torch.no_grad():
-            outputs = model(**inputs)
-        
-        logits = outputs.logits
-        logging.debug(f"Logits shape: {logits.shape}")
-        last_token_logits = logits[0, -1]
+        # Extract logprobs for the last token
+        logprobs = outputs[0].outputs[0].logprobs
+        if not logprobs:
+            logging.warning(f"No logprobs returned for index {question_index}")
+            return "Error", {}, raw_output, {}
 
-        # Extract raw logits for A, B, C, D
+        last_token_logprobs = logprobs[-1]  # Logprobs for the last generated token
+        logging.debug(f"Last token logprobs: {[(token, prob.logprob, prob.decoded_token) for token, prob in last_token_logprobs.items()][:20]}")
+
+        # Map tokens to logprobs
         answer_tokens = {letter: tokenizer.encode(letter, add_special_tokens=False)[0] for letter in 'ABCD'}
+        space_answer_tokens = {letter: tokenizer.encode(f" {letter}", add_special_tokens=False)[0] for letter in 'ABCD'}
         logging.debug(f"Answer token IDs: {answer_tokens}")
-        for letter, token_id in answer_tokens.items():
-            decoded = tokenizer.decode(token_id)
-            logging.debug(f"Token ID {token_id} decodes to: '{decoded}'")
+        logging.debug(f"Space-prefixed answer token IDs: {space_answer_tokens}")
 
-        answer_logits = {}
-        for letter, token_id in answer_tokens.items():
+        # Convert logprobs to raw logits, handling both letter and space-prefixed letter
+        answer_logits = {'A': float('-inf'), 'B': float('-inf'), 'C': float('-inf'), 'D': float('-inf')}
+        for token, logprob in last_token_logprobs.items():
             try:
-                answer_logits[letter] = last_token_logits[token_id].item()
-            except IndexError:
-                answer_logits[letter] = 0.0
+                token_ids = tokenizer.encode(logprob.decoded_token, add_special_tokens=False)
+                if not token_ids:
+                    continue  # Skip empty encodings
+                token_id = token_ids[0]
+            except Exception as e:
+                logging.warning(f"Skipping token '{logprob.decoded_token}' due to encoding error: {e}")
+                continue
+
+            for letter in 'ABCD':
+                if token_id == answer_tokens[letter] or token_id == space_answer_tokens[letter]:
+                    answer_logits[letter] = max(answer_logits[letter], logprob.logprob)
+
 
         logging.debug(f"Raw logits for A, B, C, D: {answer_logits}")
 
         # Extract top 10 logits (excluding A, B, C, D and their space-prefixed versions)
-        answer_token_ids = set(answer_tokens.values())
-        space_answer_tokens = {f" {letter}": tokenizer.encode(f" {letter}", add_special_tokens=False)[0] for letter in 'ABCD'}
-        logging.debug(f"Space-prefixed token IDs: {space_answer_tokens}")
-        exclude_token_ids = answer_token_ids.union(set(space_answer_tokens.values()))
-
-        top_k_values, top_k_indices = torch.topk(last_token_logits, k=10 + len(exclude_token_ids))
+        exclude_token_ids = set(answer_tokens.values()) | set(space_answer_tokens.values())
         top_10_logits = {}
-        for idx, value in zip(top_k_indices, top_k_values):
-            token_id = idx.item()
-            if token_id in exclude_token_ids:
+        sorted_logprobs = sorted(last_token_logprobs.items(), key=lambda x: x[1].logprob, reverse=True)
+        for token_id, logprob in sorted_logprobs:
+            try:
+                token_ids = tokenizer.encode(logprob.decoded_token, add_special_tokens=False)
+                if not token_ids:
+                    continue
+                if token_ids[0] in exclude_token_ids:
+                    continue
+                decoded = tokenizer.convert_ids_to_tokens(token_ids[0])
+                top_10_logits[decoded] = logprob.logprob
+                if len(top_10_logits) >= 10:
+                    break
+            except Exception as e:
+                logging.warning(f"Skipping token '{logprob.decoded_token}' due to decoding error: {e}")
                 continue
-            token = tokenizer.decode(token_id)
-            top_10_logits[token] = value.item()
-            if len(top_10_logits) >= 10:
-                break
 
         logging.debug(f"Top 10 logits (excluding A, B, C, D and space-prefixed versions): {top_10_logits}")
 
-        # Compute softmax probabilities to determine the answer
-        probs = torch.softmax(last_token_logits, dim=-1)
+        # Compute softmax probabilities for answer selection
         answer_probs = {}
-        for letter, token_id in answer_tokens.items():
-            try:
-                answer_probs[letter] = probs[token_id].item()
-            except IndexError:
+        for letter, logprob in answer_logits.items():
+            if logprob != float('-inf'):
+                answer_probs[letter] = torch.exp(torch.tensor(logprob)).item()
+            else:
                 answer_probs[letter] = 0.0
 
         total_prob = sum(answer_probs.values())
@@ -174,6 +190,7 @@ def main():
     question_type = args.question_type
     input_filename = args.input_filename
     full_question_column = args.full_question_column
+    inference_mode = args.inference_mode
     max_retries = args.max_retries
 
     # Validation: Ensure academic_level is only specified for academic prefix
@@ -187,23 +204,30 @@ def main():
     if not hf_token:
         raise ValueError("HF_TOKEN environment variable not set.")
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
-    logging.info(f"Using device: {device}")
-
     try:
-        print("Loading tokenizer...")
-        logging.info("Loading tokenizer...")
+        print("Loading tokenizer for token mapping...")
+        logging.info("Loading tokenizer for token mapping...")
         tokenizer = AutoTokenizer.from_pretrained(model_name, token=hf_token, trust_remote_code=True)
-        if tokenizer.pad_token_id is None:
-            tokenizer.pad_token_id = tokenizer.eos_token_id
-            logging.info(f"Set pad_token_id to eos_token_id: {tokenizer.pad_token_id}")
 
-        print("Loading model...")
-        logging.info("Loading model...")
-        model = AutoModelForCausalLM.from_pretrained(model_name, token=hf_token, trust_remote_code=True)
-        model = model.to(device)
-        model.eval()
+        print("Loading vLLM model...")
+        logging.info("Loading vLLM model...")
+        os.environ['HF_TOKEN'] = hf_token
+        llm = LLM(model=model_name, trust_remote_code=True, gpu_memory_utilization=0.8, dtype="float32", max_logprobs=100, max_model_len=4096)
+
+        # Define sampling parameters
+        sampling_params_cot = SamplingParams(
+            max_tokens=1000,
+            temperature=0.0,
+            top_p=1.0,
+            include_stop_str_in_output=True
+        )
+        sampling_params_logit = SamplingParams(
+            max_tokens=1,
+            temperature=0.0,
+            top_p=1.0,
+            logprobs=100,
+            include_stop_str_in_output=True
+        )
 
         print(f"Loading DataFrame from {input_filename}...")
         logging.info(f"Loading DataFrame from {input_filename}...")
@@ -241,7 +265,9 @@ def main():
         logging.info("Testing with the first 5 questions...")
         for idx in df.index[:5]:
             question = df.at[idx, full_question_column]
-            answer, logits, raw_out, top_10 = process_question(question, tokenizer, model, device, idx)
+            answer, logits, raw_out, top_10 = process_question(
+                question, tokenizer, llm, sampling_params_cot, sampling_params_logit, inference_mode, idx
+            )
             print(f"Test question at index {idx}: Answer = {answer}, Logits = {logits}, Raw Output = {raw_out[:100]}..., Top 10 Logits = {top_10}")
             logging.info(f"Test question at index {idx}: Answer = {answer}, Logits = {logits}, Raw Output = {raw_out}, Top 10 Logits = {top_10}")
             torch.cuda.empty_cache()
@@ -251,7 +277,9 @@ def main():
         for idx in tqdm(df.index, total=len(df), desc="Initial processing"):
             if not is_valid_answer(df.at[idx, "model_answer"]):
                 question = df.at[idx, full_question_column]
-                answer, logits, raw_out, top_10 = process_question(question, tokenizer, model, device, idx)
+                answer, logits, raw_out, top_10 = process_question(
+                    question, tokenizer, llm, sampling_params_cot, sampling_params_logit, inference_mode, idx
+                )
                 df.at[idx, "model_answer"] = answer
                 df.at[idx, "answer_logits"] = logits
                 df.at[idx, "raw_output"] = raw_out
@@ -276,7 +304,9 @@ def main():
             logging.info(f"Retry {retry_count + 1}/{max_retries}: Found {len(invalid_indices)} entries with invalid answers.")
             for idx in tqdm(invalid_indices, desc=f"Retry {retry_count + 1}"):
                 question = df.at[idx, full_question_column]
-                answer, logits, raw_out, top_10 = process_question(question, tokenizer, model, device, idx)
+                answer, logits, raw_out, top_10 = process_question(
+                    question, tokenizer, llm, sampling_params_cot, sampling_params_logit, inference_mode, idx
+                )
                 df.at[idx, "model_answer"] = answer
                 df.at[idx, "answer_logits"] = logits
                 df.at[idx, "raw_output"] = raw_out
@@ -300,10 +330,13 @@ def main():
         # Create output directory if it doesn't exist
         os.makedirs(output_dir, exist_ok=True)
 
-        # Define output filename: model_name_DATETIME.pkl
+        # Define output filename based on inference mode
         model_short_name = model_name.split("/")[-1].replace(".", "_")
         timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_filename = f"{output_dir}/{model_short_name}_{timestamp_str}.pkl"
+        if inference_mode == "logit_and_cot":
+            output_filename = f"{output_dir}/{model_short_name}_cot_{timestamp_str}.pkl"
+        else:  # logit_only
+            output_filename = f"{output_dir}/{model_short_name}_logit_{timestamp_str}.pkl"
 
         invalid_count = len(df[
             df["model_answer"].isna() |
@@ -334,3 +367,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+    if dist.is_initialized():
+        dist.destroy_process_group()
