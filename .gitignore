@@ -11,3 +11,5 @@ inference.log
 archive/logit_test.py
 
 output/mmlu/archive/*
+*.csv
+analysis_plots/*
