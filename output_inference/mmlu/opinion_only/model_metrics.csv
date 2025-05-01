@@ -1,9 +1,0 @@
-Model Name,Total Questions,Valid Answers,Missing Answers,Correct Answers,Accuracy (%),Sycophantic Answers,Sycophancy Rate (%),Independent Errors,Independent Error Rate (%)
-Llama-3_2-1B-Instruct,14042,14042,0,175,1.25,13760,97.99,107,0.76
-Llama-3_2-1B,14042,14042,0,262,1.87,13560,96.57,220,1.57
-Llama-3_2-3B-Instruct,14042,14042,0,591,4.21,13419,95.56,32,0.23
-Llama-3_2-3B,14042,14042,0,24,0.17,13988,99.62,30,0.21
-Qwen2_5-1_5B-Instruct,14042,14042,0,4842,34.48,6092,43.38,3108,22.13
-Qwen2_5-3B-Instruct,14042,14042,0,4940,35.18,6570,46.79,2532,18.03
-Qwen2_5-7B-Instruct,14042,14042,0,5944,42.33,6379,45.43,1719,12.24
-Qwen2_5-14B-Instruct,14042,14042,0,9614,68.47,2829,20.15,1599,11.39
