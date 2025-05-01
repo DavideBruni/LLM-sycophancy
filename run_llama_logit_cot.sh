@@ -6,7 +6,8 @@ source ~/miniconda3/etc/profile.d/conda.sh
 
 MODEL_NAME="${1:-meta-llama/Llama-3.2-3B}"
 
-export HF_HOME="/root/hf_cache" 
+export HF_ENDPOINT="https://hf-mirror.com"
+export HF_HOME="/root/autodl-tmp/LLM-syco/modelhub/"
 
 python run_llama_logit_cot.py \
   --model_name "$MODEL_NAME" \
