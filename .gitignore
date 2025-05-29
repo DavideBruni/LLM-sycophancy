@@ -6,7 +6,7 @@ dcgm/
 logs/
 
 output/mmlupro/*
-inference.log
+*.log
 
 archive/logit_test.py
 
