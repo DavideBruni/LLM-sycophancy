@@ -11,41 +11,24 @@ import traceback
 from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig
 import numpy as np
 
-# Set up logging
-logging.basicConfig(filename='inference_early_decoding.log', level=logging.DEBUG,
+# Minimal logging setup - only errors and warnings
+logging.basicConfig(filename='inference_early_decoding.log', level=logging.WARNING,
                     format='%(asctime)s - %(levelname)s - %(message)s')
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Run LLaMA inference with chain-of-thought and/or logit computation using Transformers.")
-    parser.add_argument("--model_name", type=str, default="meta-llama/Llama-2-7b-hf", help="Model name for inference (e.g., 'meta-llama/Llama-2-7b-hf', 'Qwen/Qwen2.5-7B-Instruct')")
-    parser.add_argument("--dataset", type=str, default="mmlu", choices=["mmlu"], help="Dataset to use (currently only 'mmlu' supported)")
-    parser.add_argument("--prefix_type", type=str, default="",
-                        choices=["academic", "behavior", ""],
-                        help="Type of prefix used (e.g., 'academic', 'behavior').")
-    parser.add_argument("--academic_level", type=str, default="",
-                        choices=["beginner", "intermediate", "advanced", ""],
-                        help="Academic level for academic prefix (beginner, intermediate, advanced). "
-                             "Only applies when prefix_type='academic'.")
-    parser.add_argument("--prefix_subtype", type=str, default="",
-                        choices=["original", "mixing_subject", "third_pov", ""],
-                        help="Subtype of prefix (original, mixing_subject, third_pov).")
-    parser.add_argument("--question_type", type=str, default="plain",
-                        choices=["prefix_and_opinion", "opinion_only", "plain"],
-                        help="Type of the questions: 'prefix_and_opinion' (prefix + opinion), "
-                             "'opinion_only' or 'plain' (no prefix or opinion).")
-    parser.add_argument("--input_filename", type=str, default="output/mmlu/mmlu_plain.pkl",
-                        help="Input .pkl file with pre-constructed questions")
-    parser.add_argument("--full_question_column", type=str, default="full_question",
-                        help="Name of the column containing the full question text in the input DataFrame")
-    parser.add_argument("--inference_mode", type=str, default="logit_only",
-                        choices=["logit_only", "logit_and_cot"],
-                        help="Inference mode: 'logit_only' for logit-based answer selection without CoT, "
-                             "'logit_and_cot' for chain-of-thought generation and logit-based selection.")
-    parser.add_argument("--inference_layer", type=str, default="all",
-                        choices=["", "all", "odd", "even", "last"],
-                        help="Layers to compute logits: '' or 'all' for all layers, 'odd' for odd-numbered layers, 'even' for "
-                             "even-numbered layers, 'last' for only the last layer.")
+    parser.add_argument("--model_name", type=str, default="meta-llama/Llama-2-7b-hf", help="Model name for inference")
+    parser.add_argument("--dataset", type=str, default="mmlu", choices=["mmlu"], help="Dataset to use")
+    parser.add_argument("--prefix_type", type=str, default="", choices=["academic", "behavior", ""], help="Type of prefix used")
+    parser.add_argument("--academic_level", type=str, default="", choices=["beginner", "intermediate", "advanced", ""], help="Academic level for academic prefix")
+    parser.add_argument("--prefix_subtype", type=str, default="", choices=["original", "mixing_subject", "third_pov", ""], help="Subtype of prefix")
+    parser.add_argument("--question_type", type=str, default="plain", choices=["prefix_and_opinion", "opinion_only", "plain"], help="Type of the questions")
+    parser.add_argument("--input_filename", type=str, default="output/mmlu/mmlu_plain.pkl", help="Input .pkl file with pre-constructed questions")
+    parser.add_argument("--full_question_column", type=str, default="full_question", help="Name of the column containing the full question text")
+    parser.add_argument("--inference_mode", type=str, default="logit_only", choices=["logit_only", "logit_and_cot"], help="Inference mode")
+    parser.add_argument("--inference_layer", type=str, default="all", choices=["", "all", "odd", "even", "last"], help="Layers to compute logits")
     parser.add_argument("--max_retries", type=int, default=3, help="Maximum number of retries for invalid answers")
+    parser.add_argument("--batch_size", type=int, default=1, help="Batch size for inference")
     return parser.parse_args()
 
 def is_valid_answer(answer):
@@ -65,237 +48,183 @@ def get_layer_indices(total_layers, inference_layer_arg):
     else:
         raise ValueError(f"Invalid inference_layer: {inference_layer_arg}")
 
-def process_question(args, question, tokenizer, model, inference_mode, inference_layer_arg, question_index):
+# Pre-compute answer token IDs once globally
+def get_answer_token_ids(tokenizer):
+    """Pre-compute answer token IDs for efficiency."""
+    answer_tokens_ids = {}
+    for letter in 'ABCD':
+        token_ids = []
+        # Try plain letter
+        plain_token = tokenizer.encode(letter, add_special_tokens=False)
+        if plain_token:
+            token_ids.append(plain_token[0])
+        # Try space-prefixed letter
+        space_token = tokenizer.encode(f" {letter}", add_special_tokens=False)
+        if space_token and len(space_token) > 0:
+            token_ids.append(space_token[0])
+        # Remove duplicates
+        answer_tokens_ids[letter] = sorted(list(set(token_ids)))
+        if not answer_tokens_ids[letter]:
+            raise ValueError(f"Could not find valid token ID for '{letter}' or ' {letter}'.")
+    return answer_tokens_ids
+
+def process_question_batch(args, questions, tokenizer, model, inference_mode, inference_layer_arg, answer_tokens_ids, layer_indices_to_process, total_layers):
+    """Process a batch of questions for better efficiency."""
+    batch_results = []
+    
     try:
-        logging.debug(f"Processing question at index {question_index}: '{question[:50]}...'")
-        if not isinstance(question, str) or not question.strip():
-            raise ValueError(f"Invalid question at index {question_index}: must be a non-empty string, got '{question}'")
-
-        # Prompt suffix for model answers
-        prompt = f"{question}\nAnswer:"
-
-        # Tokenize the prompt
-        inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+        # Prepare prompts
+        prompts = [f"{question}\nAnswer:" for question in questions]
+        
+        # Tokenize batch
+        inputs = tokenizer(prompts, return_tensors="pt", padding=True, truncation=True).to(model.device)
         input_ids = inputs["input_ids"]
         attention_mask = inputs["attention_mask"]
-
-        raw_output = ""  # Store generated output if CoT is enabled
+        
+        batch_raw_outputs = [""] * len(questions)
+        
+        # CoT generation if needed
         if inference_mode == "logit_and_cot":
-            logging.info(f"Generating CoT for index {question_index}: {prompt[:100]}...")
-            outputs = model.generate(
-                input_ids,
-                attention_mask=attention_mask,
-                max_new_tokens=512,
-                temperature=0.0,
-                top_p=1.0,
-                do_sample=False,
-                return_dict_in_generate=True,
-                output_scores=True
-            )
-            raw_output = tokenizer.decode(outputs.sequences[0][input_ids.shape[1]:], skip_special_tokens=True).strip()
-            logging.debug(f"Raw model output (CoT): {raw_output}")
-
-        # Compute logits for answer selection at specified layers
-        logging.info(f"Computing layer-wise logits for index {question_index}: {prompt[:100]}...")
+            with torch.no_grad():
+                outputs = model.generate(
+                    input_ids,
+                    attention_mask=attention_mask,
+                    max_new_tokens=512,
+                    temperature=0.0,
+                    top_p=1.0,
+                    do_sample=False,
+                    pad_token_id=tokenizer.pad_token_id
+                )
+            for i, seq in enumerate(outputs):
+                batch_raw_outputs[i] = tokenizer.decode(seq[input_ids.shape[1]:], skip_special_tokens=True).strip()
+        
+        # Compute logits efficiently
         with torch.no_grad():
             outputs = model(input_ids, attention_mask=attention_mask, output_hidden_states=True)
-            hidden_states = outputs.hidden_states  # Tuple of (embedding_output, layer_0_output, ..., layer_N-1_output)
-
-        answer_tokens_ids = {} # Correctly initialized here
-        for letter in 'ABCD':
-            token_ids = []
-            # Try plain letter
-            plain_token = tokenizer.encode(letter, add_special_tokens=False)
-            if plain_token:
-                token_ids.append(plain_token[0])
-            # Try space-prefixed letter
-            space_token = tokenizer.encode(f" {letter}", add_special_tokens=False)
-            if space_token and len(space_token) > 0:
-                token_ids.append(space_token[0])
-            # Remove duplicates and validate
-            # FIX: Change 'answer_token_ids' to 'answer_tokens_ids'
-            answer_tokens_ids[letter] = sorted(list(set(token_ids)))
-            if not answer_tokens_ids[letter]: # Also fix here
-                raise ValueError(f"Could not find valid token ID for '{letter}' or ' {letter}'. "
-                                 f"Check tokenizer for '{model.name_or_path}'.")
-        logging.debug(f"Resolved token IDs: {answer_tokens_ids}") # And here
-
-
-        # Initialize layer-wise logits storage
-        total_layers = model.config.num_hidden_layers
-        layer_indices_to_process = get_layer_indices(total_layers, inference_layer_arg)
-        layer_wise_abcd_logits = {f"Layer_{i}": {} for i in layer_indices_to_process}
-
-        # Process logits for each specified layer
-        for layer_idx in layer_indices_to_process:
-            hidden_state_at_last_input_token = hidden_states[layer_idx + 1][:, -1, :]
-            layer_logits_raw = model.lm_head(hidden_state_at_last_input_token)
-            # FIX: Change 'layer_wise_abcd_logits[f"layer_{layer_idx}"]' to 'layer_wise_abcd_logits[f"Layer_{layer_idx}"]'
-            # Also ensure consistency in the variable name used for iteration.
-            current_layer_logits = layer_wise_abcd_logits[f"Layer_{layer_idx}"] # Use f"Layer_{layer_idx}" to match dict init
-
-            for letter in 'ABCD':
-                max_logit_for_letter = -float('inf')
-                for token_id in answer_tokens_ids[letter]: # FIX: Use answer_tokens_ids
-                    if token_id < layer_logits_raw.shape[-1]:
-                        max_logit_for_letter = max(max_logit_for_letter, layer_logits_raw[0, token_id].item())
-                current_layer_logits[letter] = max_logit_for_letter
-            logging.debug(f"Layer {layer_idx} ABCD logits: {current_layer_logits}")
-
-        # Determine final answer based on the last layer's logits
-        final_layer_idx = total_layers - 1
-        if final_layer_idx not in layer_indices_to_process:
-            hidden_state_at_last_input_token = hidden_states[final_layer_idx + 1][:, -1, :]
-            final_layer_logits_raw = model.lm_head(hidden_state_at_last_input_token)
-            last_layer_abcd_logits = {}
-            for letter in 'ABCD':
-                max_logit_for_letter = -float('inf')
-                for token_id in answer_tokens_ids[letter]: # FIX: Use answer_tokens_ids
-                    if token_id < final_layer_logits_raw.shape[-1]:
-                        max_logit_for_letter = max(max_logit_for_letter, final_layer_logits_raw[0, token_id].item())
-                last_layer_abcd_logits[letter] = max_logit_for_letter
-        else:
-            # FIX: Use f"Layer_{final_layer_idx}" to match dict init
-            last_layer_abcd_logits = layer_wise_abcd_logits[f"Layer_{final_layer_idx}"]
-
-
-        # Convert logits to probabilities for answer selection
-        abcd_logit_values = torch.tensor([last_layer_abcd_logits[letter] for letter in 'ABCD'])
-        abcd_probs = torch.softmax(abcd_logit_values, dim=-1).tolist()
-        answer_probs_dict = {letter: prob for letter, prob in zip('ABCD', abcd_probs)}
-        selected_answer = max(answer_probs_dict, key=answer_probs_dict.get)
-        logging.debug(f"Final answer based on last layer logits: {selected_answer}, Probabilities: {answer_probs_dict}")
-
-        if not is_valid_answer(selected_answer):
-            logging.warning(f"Invalid final selected answer at index {question_index}: '{selected_answer}' for question: '{question[:50]}...'")
-            return "Error", layer_wise_abcd_logits, raw_output
-
-        return selected_answer, layer_wise_abcd_logits, raw_output
-
+            hidden_states = outputs.hidden_states
+        
+        # Process each question in the batch
+        for batch_idx, question in enumerate(questions):
+            try:
+                # Initialize layer-wise logits storage
+                layer_wise_abcd_logits = {f"Layer_{i}": {} for i in layer_indices_to_process}
+                
+                # Get sequence length for this specific question (handle padding)
+                seq_len = attention_mask[batch_idx].sum().item()
+                last_token_idx = seq_len - 1
+                
+                # Process logits for each specified layer
+                for layer_idx in layer_indices_to_process:
+                    hidden_state_at_last_token = hidden_states[layer_idx + 1][batch_idx, last_token_idx, :].unsqueeze(0)
+                    layer_logits_raw = model.lm_head(hidden_state_at_last_token)
+                    current_layer_logits = layer_wise_abcd_logits[f"Layer_{layer_idx}"]
+                    
+                    for letter in 'ABCD':
+                        max_logit_for_letter = -float('inf')
+                        for token_id in answer_tokens_ids[letter]:
+                            if token_id < layer_logits_raw.shape[-1]:
+                                max_logit_for_letter = max(max_logit_for_letter, layer_logits_raw[0, token_id].item())
+                        current_layer_logits[letter] = max_logit_for_letter
+                
+                # Determine final answer based on the last layer's logits
+                final_layer_idx = total_layers - 1
+                if final_layer_idx not in layer_indices_to_process:
+                    hidden_state_at_last_token = hidden_states[final_layer_idx + 1][batch_idx, last_token_idx, :].unsqueeze(0)
+                    final_layer_logits_raw = model.lm_head(hidden_state_at_last_token)
+                    last_layer_abcd_logits = {}
+                    for letter in 'ABCD':
+                        max_logit_for_letter = -float('inf')
+                        for token_id in answer_tokens_ids[letter]:
+                            if token_id < final_layer_logits_raw.shape[-1]:
+                                max_logit_for_letter = max(max_logit_for_letter, final_layer_logits_raw[0, token_id].item())
+                        last_layer_abcd_logits[letter] = max_logit_for_letter
+                else:
+                    last_layer_abcd_logits = layer_wise_abcd_logits[f"Layer_{final_layer_idx}"]
+                
+                # Convert logits to probabilities for answer selection
+                abcd_logit_values = torch.tensor([last_layer_abcd_logits[letter] for letter in 'ABCD'])
+                abcd_probs = torch.softmax(abcd_logit_values, dim=-1)
+                answer_probs_dict = {letter: prob.item() for letter, prob in zip('ABCD', abcd_probs)}
+                selected_answer = max(answer_probs_dict, key=answer_probs_dict.get)
+                
+                if not is_valid_answer(selected_answer):
+                    selected_answer = "Error"
+                
+                batch_results.append((selected_answer, layer_wise_abcd_logits, batch_raw_outputs[batch_idx]))
+                
+            except Exception as e:
+                logging.error(f"Error processing question in batch: {str(e)}")
+                batch_results.append(("Error", {}, "Error in processing"))
+    
     except Exception as e:
-        logging.error(f"Error processing question at index {question_index} '{question[:50]}...': {str(e)}\n{traceback.format_exc()}")
-        return "Error", {}, "Error in processing"
+        logging.error(f"Error processing batch: {str(e)}")
+        # Return error results for all questions in batch
+        for _ in questions:
+            batch_results.append(("Error", {}, "Error in processing"))
+    
+    return batch_results
 
 def main():
     try:
         args = parse_args()
-        model_name = args.model_name
-        dataset = args.dataset
-        prefix_type = args.prefix_type
-        academic_level = args.academic_level
-        prefix_subtype = args.prefix_subtype
-        question_type = args.question_type
-        input_filename = args.input_filename
-        full_question_column = args.full_question_column
-        inference_mode = args.inference_mode
-        inference_layer = args.inference_layer
-        max_retries = args.max_retries
-
+        
         # Validation
-        if academic_level and prefix_type != "academic":
+        if args.academic_level and args.prefix_type != "academic":
             raise ValueError("The --academic_level argument is only applicable when prefix_type='academic'.")
-        if question_type == "prefix_and_opinion" and not prefix_type:
-            raise ValueError("For 'prefix_and_opinion' question_type, a prefix_type (e.g., 'academic' or 'behavior') must be specified.")
-
+        if args.question_type == "prefix_and_opinion" and not args.prefix_type:
+            raise ValueError("For 'prefix_and_opinion' question_type, a prefix_type must be specified.")
+        
         # Check HF_TOKEN
         hf_token = config.HF_TOKEN
         if not hf_token or hf_token == "YOUR_HF_TOKEN_HERE":
-            raise ValueError("HF_TOKEN is not set or is still the placeholder. Please set it in config.py or as an environment variable.")
-        logging.info(f"HF_TOKEN is set (length: {len(hf_token)} characters)")
-
-        # Debug: Log parsed arguments
-        print(f"Parsed model_name: '{model_name}'")
-        logging.info(f"Parsed model_name: '{model_name}'")
-        if not model_name or not isinstance(model_name, str) or model_name.strip() == "":
-            raise ValueError(f"Model name is invalid or empty: '{model_name}'. Please provide a valid model name (e.g., 'Qwen/Qwen2.5-7B-Instruct').")
-
-        # Debug: Environment and library info
-        print(f"PyTorch version: {torch.__version__}")
-        print(f"CUDA available: {torch.cuda.is_available()}")
-        print(f"CUDA device count: {torch.cuda.device_count()}")
-        print(f"CUDA version: {torch.version.cuda}")
-        logging.info(f"PyTorch version: {torch.__version__}")
-        logging.info(f"CUDA available: {torch.cuda.is_available()}")
-        logging.info(f"CUDA device count: {torch.cuda.device_count()}")
-        logging.info(f"CUDA version: {torch.version.cuda}")
-
+            raise ValueError("HF_TOKEN is not set. Please set it in config.py.")
+        
+        print(f"Loading model: {args.model_name}")
+        
         # Load tokenizer
-        print("Loading tokenizer...")
-        logging.info("Loading tokenizer...")
-        tokenizer = AutoTokenizer.from_pretrained(model_name, token=hf_token, trust_remote_code=True)
+        tokenizer = AutoTokenizer.from_pretrained(args.model_name, token=hf_token, trust_remote_code=True)
         if tokenizer.pad_token is None and tokenizer.eos_token is not None:
             tokenizer.pad_token = tokenizer.eos_token
         elif tokenizer.pad_token is None:
             tokenizer.add_special_tokens({'pad_token': '[PAD]'})
-        logging.info("Tokenizer loaded successfully")
-
-                
-        # Load and inspect model configuration
-        print("Loading configuration...")
-        logging.info("Loading configuration...")
-        model_config = AutoConfig.from_pretrained(model_name, token=hf_token, trust_remote_code=True)
-
-        # --- Enhanced Patching and Debugging ---
-        # Ensure these are not None. The 'or' condition ensures it's set if currently None.
+        
+        # Load model configuration with patches
+        model_config = AutoConfig.from_pretrained(args.model_name, token=hf_token, trust_remote_code=True)
         model_config.tensor_parallel_degree = getattr(model_config, 'tensor_parallel_degree', None) or 1
-        logging.info(f"Patched tensor_parallel_degree to {model_config.tensor_parallel_degree}")
-
         model_config.pipeline_parallel_degree = getattr(model_config, 'pipeline_parallel_degree', None) or 1
-        logging.info(f"Patched pipeline_parallel_degree to {model_config.pipeline_parallel_degree}")
-
-        # This is often the culprit. Ensure it's not None.
-        # 'eager' is a safe default for non-optimized attention.
         model_config._attn_implementation = getattr(model_config, '_attn_implementation', None) or 'eager'
-        logging.info(f"Patched _attn_implementation to '{model_config._attn_implementation}'")
-
-        # Check for other potential None values that might be iterated
-        # You can inspect the Qwen2Config source or common Transformers patterns
-        # Example: If there was a 'parallel_strategy' attribute that could be None
-        # model_config.parallel_strategy = getattr(model_config, 'parallel_strategy', None) or 'default'
-        # logging.info(f"Patched parallel_strategy to '{model_config.parallel_strategy}'")
-
-        print(f"Model config after patching: {model_config}") # Print the patched config
-        logging.info(f"Model config after patching: {model_config}")
-
-        # Load model
-        print("Loading Transformers model...")
-        logging.info("Loading Transformers model...")
-        device = "cpu" # Force CPU for debugging
+        
+        # Load model - use GPU if available
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        print(f"Using device: {device}")
+        
         model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            config=model_config, # Pass the *patched* config
+            args.model_name,
+            config=model_config,
             token=hf_token,
             trust_remote_code=True,
-            torch_dtype=torch.float16 # Use float16 for CPU compatibility
+            torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+            device_map="auto" if device == "cuda" else None
         )
-
-        model.to(device)
+        
+        if device == "cpu":
+            model.to(device)
         model.eval()
+        
         if tokenizer.pad_token == '[PAD]':
             model.resize_token_embeddings(len(tokenizer))
-        logging.info(f"Model loaded successfully on {device}")
-
+        
+        # Pre-compute answer token IDs
+        answer_tokens_ids = get_answer_token_ids(tokenizer)
+        
         # Load DataFrame
-        print(f"Loading DataFrame from {input_filename}...")
-        logging.info(f"Loading DataFrame from {input_filename}...")
-        df = pd.read_pickle(input_filename)
-        print(f"Loaded DataFrame with {len(df)} entries.")
-        logging.info(f"Loaded DataFrame with {len(df)} entries.")
-        print(f"DataFrame columns: {df.columns}")
-        logging.info(f"DataFrame columns: {df.columns}")
-
-        if full_question_column not in df.columns:
-            raise ValueError(f"Input DataFrame must contain a '{full_question_column}' column.")
-
-        # Validate questions
-        print(f"Validating '{full_question_column}' column...")
-        logging.info(f"Validating '{full_question_column}' column...")
-        invalid_questions = df[full_question_column].apply(lambda x: not isinstance(x, str) or not x.strip())
-        if invalid_questions.any():
-            invalid_indices = invalid_questions[invalid_questions].index.tolist()
-            invalid_samples = df.loc[invalid_indices, full_question_column].head().to_dict()
-            raise ValueError(f"Found {len(invalid_indices)} invalid questions in '{full_question_column}' column: {invalid_samples}")
-
+        print(f"Loading data from {args.input_filename}")
+        df = pd.read_pickle(args.input_filename)
+        print(f"Loaded {len(df)} questions")
+        
+        if args.full_question_column not in df.columns:
+            raise ValueError(f"Input DataFrame must contain a '{args.full_question_column}' column.")
+        
         # Initialize DataFrame columns
         if "model_answer" not in df.columns:
             df["model_answer"] = None
@@ -303,111 +232,106 @@ def main():
             df["layer_logits"] = None
         if "raw_output" not in df.columns:
             df["raw_output"] = None
-
-        # Test with first 5 questions
-        print("Testing with first 5 questions...")
-        logging.info("Testing with first 5 questions...")
-        for idx in df.index[:5]:
-            question = df.at[idx, full_question_column]
-            answer, layer_logits_data, raw_out = process_question(
-                args, # <--- ADD THIS ARGUMENT
-                question, tokenizer, model, inference_mode, inference_layer, idx
-            )
-            print(f"Test question at index {idx}: Answer = {answer}, Layer Logits Data = {layer_logits_data}, Raw Output = {raw_out[:100]}...")
-            logging.info(f"Test question at index {idx}: Answer = {answer}, Layer Logits Data = {layer_logits_data}, Raw Output = {raw_out}")
-
-        # Process all questions
-        print("Processing all questions...")
-        logging.info("Processing all questions...")
-        for idx in tqdm(df.index, total=len(df), desc="Initial processing"):
-            if not is_valid_answer(df.at[idx, "model_answer"]) or df.at[idx, "layer_logits"] is None:
-                question = df.at[idx, full_question_column]
-                answer, layer_logits_data, raw_out = process_question(
-                    args, # <--- ADD THIS ARGUMENT HERE TOO
-                    question, tokenizer, model, inference_mode, inference_layer, idx
+        
+        # Get layer configuration
+        total_layers = model.config.num_hidden_layers
+        layer_indices_to_process = get_layer_indices(total_layers, args.inference_layer)
+        
+        print("Processing questions...")
+        
+        # Process in batches for efficiency
+        batch_size = args.batch_size
+        total_questions = len(df)
+        
+        for start_idx in tqdm(range(0, total_questions, batch_size), desc="Processing batches"):
+            end_idx = min(start_idx + batch_size, total_questions)
+            batch_indices = df.index[start_idx:end_idx]
+            
+            # Skip if already processed
+            batch_to_process = []
+            batch_df_indices = []
+            
+            for idx in batch_indices:
+                if not is_valid_answer(df.at[idx, "model_answer"]) or df.at[idx, "layer_logits"] is None:
+                    batch_to_process.append(df.at[idx, args.full_question_column])
+                    batch_df_indices.append(idx)
+            
+            if batch_to_process:
+                batch_results = process_question_batch(
+                    args, batch_to_process, tokenizer, model, args.inference_mode, 
+                    args.inference_layer, answer_tokens_ids, layer_indices_to_process, total_layers
                 )
-                df.at[idx, "model_answer"] = answer
-                df.at[idx, "layer_logits"] = layer_logits_data
-                df.at[idx, "raw_output"] = raw_out
-
-
-        # Retry logic for failed entries
-        retry_count = 0
-        while retry_count < max_retries:
+                
+                # Update DataFrame with results
+                for df_idx, (answer, layer_logits, raw_output) in zip(batch_df_indices, batch_results):
+                    df.at[df_idx, "model_answer"] = answer
+                    df.at[df_idx, "layer_logits"] = layer_logits
+                    df.at[df_idx, "raw_output"] = raw_output
+        
+        # Retry logic for failed entries (simplified)
+        for retry in range(args.max_retries):
             invalid_indices = df.index[
                 df["model_answer"].isna() |
                 (df["model_answer"] == "") |
                 (df["model_answer"] == "Error") |
-                (~df["model_answer"].apply(is_valid_answer)) |
-                (df["layer_logits"].apply(lambda x: not x))
+                (~df["model_answer"].apply(is_valid_answer))
             ].tolist()
-
+            
             if not invalid_indices:
-                print("All entries have valid answers and layer logits collected!")
-                logging.info("All entries have valid answers and layer logits collected!")
                 break
-
-            print(f"Retry {retry_count + 1}/{max_retries}: Found {len(invalid_indices)} entries with invalid answers or missing logits.")
-            logging.info(f"Retry {retry_count + 1}/{max_retries}: Found {len(invalid_indices)} entries with invalid answers or missing logits.")
-            # Make sure to add `args` in the process_question call inside the retry loop as well!
-            for idx in tqdm(invalid_indices, desc=f"Retry {retry_count + 1}"):
-                question = df.at[idx, full_question_column]
-                answer, layer_logits_data, raw_out = process_question(
-                    args, # <--- AND HERE
-                    question, tokenizer, model, inference_mode, inference_layer, idx
+            
+            print(f"Retry {retry + 1}: {len(invalid_indices)} failed entries")
+            
+            # Process failed entries in smaller batches
+            for start_idx in range(0, len(invalid_indices), batch_size):
+                end_idx = min(start_idx + batch_size, len(invalid_indices))
+                batch_indices = invalid_indices[start_idx:end_idx]
+                batch_questions = [df.at[idx, args.full_question_column] for idx in batch_indices]
+                
+                batch_results = process_question_batch(
+                    args, batch_questions, tokenizer, model, args.inference_mode,
+                    args.inference_layer, answer_tokens_ids, layer_indices_to_process, total_layers
                 )
-                df.at[idx, "model_answer"] = answer
-                df.at[idx, "layer_logits"] = layer_logits_data
-                df.at[idx, "raw_output"] = raw_out
-
-            retry_count += 1
-            time.sleep(1)
-
-        # Construct output directory and filename
-        output_dir_parts = [f"output_inference/{dataset}"]
-        if question_type:
-            output_dir_parts.append(question_type)
-        if prefix_type:
-            output_dir_parts.append(prefix_type)
-            output_dir_parts.append(prefix_subtype)
-            if prefix_type == "academic":
-                output_dir_parts.append(academic_level)
+                
+                for df_idx, (answer, layer_logits, raw_output) in zip(batch_indices, batch_results):
+                    df.at[df_idx, "model_answer"] = answer
+                    df.at[df_idx, "layer_logits"] = layer_logits
+                    df.at[df_idx, "raw_output"] = raw_output
+        
+        # Save results
+        output_dir_parts = [f"output_inference/{args.dataset}"]
+        if args.question_type:
+            output_dir_parts.append(args.question_type)
+        if args.prefix_type:
+            output_dir_parts.append(args.prefix_type)
+            output_dir_parts.append(args.prefix_subtype)
+            if args.prefix_type == "academic":
+                output_dir_parts.append(args.academic_level)
         output_dir = os.path.join(*[part for part in output_dir_parts if part])
-
         os.makedirs(output_dir, exist_ok=True)
-
-        model_short_name = model_name.split("/")[-1].replace(".", "_").replace("-", "_")
+        
+        model_short_name = args.model_name.split("/")[-1].replace(".", "_").replace("-", "_")
         timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-        inference_mode_str = 'cot' if inference_mode == 'logit_and_cot' else 'logit'
-        output_filename = f"{output_dir}/{model_short_name}_{inference_mode_str}_{inference_layer}_{timestamp_str}.pkl"
-
-        invalid_count = len(df[
-            df["model_answer"].isna() |
-            (df["model_answer"] == "") |
-            (df["model_answer"] == "Error") |
-            (~df["model_answer"].apply(is_valid_answer)) |
-            (df["layer_logits"].apply(lambda x: not x))
-        ])
+        inference_mode_str = 'cot' if args.inference_mode == 'logit_and_cot' else 'logit'
+        output_filename = f"{output_dir}/{model_short_name}_{inference_mode_str}_{args.inference_layer}_{timestamp_str}.pkl"
+        
+        invalid_count = len(df[df["model_answer"] == "Error"])
         if invalid_count > 0:
-            print(f"Warning: {invalid_count} entries still have invalid answers or missing layer logits after {max_retries} retries.")
-            logging.warning(f"{invalid_count} entries still have invalid answers or missing layer logits after {max_retries} retries.")
+            print(f"Warning: {invalid_count} entries failed processing")
         else:
-            print("All entries successfully populated with valid answers and layer logits!")
-            logging.info("All entries successfully populated with valid answers and layer logits!")
-
-        print(f"Saving to {output_filename}...")
-        logging.info(f"Saving to {output_filename}...")
+            print("All entries processed successfully!")
+        
         df.to_pickle(output_filename)
-        print(f"Completed and saved to {output_filename} with {len(df)} rows!")
-        logging.info(f"Completed and saved to {output_filename} with {len(df)} rows!")
-
+        print(f"Results saved to {output_filename}")
+        
     except Exception as e:
-        print(f"An error occurred: {str(e)}\n{traceback.format_exc()}")
-        logging.error(f"An error occurred: {str(e)}\n{traceback.format_exc()}")
+        print(f"Error: {str(e)}")
+        logging.error(f"Error: {str(e)}\n{traceback.format_exc()}")
         raise
-
+    
     finally:
-        torch.cuda.empty_cache()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
 if __name__ == "__main__":
     main()
