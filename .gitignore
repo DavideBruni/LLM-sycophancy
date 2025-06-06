@@ -16,3 +16,5 @@ analysis_plots/*
 modelhub/*
 
 a.out
+
+output_earlydecoding/*
