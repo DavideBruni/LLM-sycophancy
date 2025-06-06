@@ -14,3 +14,5 @@ output/mmlu/archive/*
 *.csv
 analysis_plots/*
 modelhub/*
+
+a.out
