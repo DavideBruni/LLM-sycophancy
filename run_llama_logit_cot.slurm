@@ -19,8 +19,9 @@ else
   MODEL_NAME="$DEFAULT_MODEL"
 fi
 
-# Set huggingface cache dir
-export HF_HOME="/ibex/user/wangk0e/cache/huggingface"
+
+export HF_ENDPOINT="https://hf-mirror.com"
+export HF_HOME="/root/autodl-tmp/LLM_syco/modelhub/"
 
 python run_llama_logit_cot.py \
   --model_name "$MODEL_NAME" \

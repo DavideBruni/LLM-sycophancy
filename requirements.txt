@@ -3,3 +3,4 @@ transformers
 pandas
 tqdm
 accelerate
+vllm

@@ -6,10 +6,15 @@ dcgm/
 logs/
 
 output/mmlupro/*
-inference.log
+*.log
 
 archive/logit_test.py
 
 output/mmlu/archive/*
 *.csv
 analysis_plots/*
+modelhub/*
+
+a.out
+
+output_earlydecoding/*
