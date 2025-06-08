@@ -1,6 +1,6 @@
 import torch
 import pandas as pd
-import config
+#import config
 from tqdm import tqdm
 import time
 from datetime import datetime
@@ -8,7 +8,7 @@ import argparse
 import logging
 import os
 import traceback
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig
 import uuid
 import numpy as np
 
@@ -193,27 +193,64 @@ def main():
     if question_type == "prefix_and_opinion" and not prefix_type:
         raise ValueError("For 'prefix_and_opinion' question_type, a prefix_type (e.g., 'academic' or 'behavior') must be specified.")
 
-    hf_token = config.HF_TOKEN
+    import os
+    hf_token = os.getenv("HF_TOKEN")
     if not hf_token:
-        raise ValueError("HF_TOKEN environment variable not set.")
+        raise ValueError("HF_TOKEN environment variable not set. Set it using 'export HF_TOKEN=your_token' or define it in config.py.")
 
     try:
         print("Loading tokenizer...")
         logging.info("Loading tokenizer...")
-        tokenizer = AutoTokenizer.from_pretrained(model_name, token=hf_token, trust_remote_code=True)
+        tokenizer = AutoTokenizer.from_pretrained(
+            "meta-llama/Meta-Llama-3.1-8B-Instruct",  # Update to correct model ID
+            token=hf_token,
+            trust_remote_code=True
+        )
 
         print("Loading Transformers model...")
         logging.info("Loading Transformers model...")
-        model = AutoModelForCausalLM.from_pretrained(
+        # Load configuration explicitly to verify
+        config = AutoConfig.from_pretrained(
             model_name,
             token=hf_token,
             trust_remote_code=True,
-            device_map="auto",
-            torch_dtype=torch.float32,
-            output_hidden_states=True
+            force_download=True,
+            resume_download=False
+        )
+        print(f"Model configuration: {config}")
+        logging.info(f"Model configuration: {config}")
+        
+        
+        
+        
+        
+        from transformers import modeling_utils
+        if not hasattr(modeling_utils, "ALL_PARALLEL_STYLES") or modeling_utils.ALL_PARALLEL_STYLES is None:
+            modeling_utils.ALL_PARALLEL_STYLES = ["tp", "none","colwise",'rowwise']
+
+            
+        # Patch configuration to avoid NoneType error
+        if not hasattr(config, 'parallel_style') or config.parallel_style is None:
+            config.parallel_style = "none"
+            logging.warning("Patched config.parallel_style to 'none'.")
+        if not hasattr(config, '_fsdp_config') or config._fsdp_config is None:
+            config._fsdp_config = {}  # Set to empty dict to disable FSDP
+            logging.warning("Patched config._fsdp_config to empty dict.")
+        if not hasattr(config, 'model_parallel') or config.model_parallel is None:
+            config.model_parallel = False  # Disable model parallelism
+            logging.warning("Patched config.model_parallel to False.")
+
+        model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            config=config,
+            token=hf_token,
+            trust_remote_code=True,
+            torch_dtype=torch.float16,
+            device_map=None,
+            force_download=True,
+            resume_download=False
         )
         model.eval()
-
         print(f"Loading DataFrame from {input_filename}...")
         logging.info(f"Loading DataFrame from {input_filename}...")
         df = pd.read_pickle(input_filename)
