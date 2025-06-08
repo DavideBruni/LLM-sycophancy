@@ -1,17 +1,17 @@
-#!/bin/bash
-#SBATCH --job-name=run_llama_logit_cot_job_v100
-#SBATCH --time=05:00:00
-#SBATCH --cpus-per-task=8
-#SBATCH --gres=gpu:v100:1
+#!/bin/bash -l
+#SBATCH --job-name=run_logit_llama
+#SBATCH --partition=yamadau
+#SBATCH --gres=gpu:2
+#SBATCH --time=24:00:00
+#SBATCH --cpus-per-task=4
 #SBATCH --mem=256G
-#SBATCH --output=./logs/run_llama_logit_cot_v100/%j.out
-#SBATCH --error=./logs/run_llama_logit_cot_v100/%j.err
+#SBATCH --output=./logs/run_logit_llama/%j.out
 
 set -e
 
-source ~/syco/bin/activate
+conda activate syco
 
-DEFAULT_MODEL="Qwen/Qwen2.5-1.5B-Instruct"
+DEFAULT_MODEL="meta-llama/Llama-3.1-8B-Instruct"
 
 if [[ -n "$1" ]]; then
   MODEL_NAME="$1"
@@ -19,19 +19,15 @@ else
   MODEL_NAME="$DEFAULT_MODEL"
 fi
 
-
-export HF_ENDPOINT="https://hf-mirror.com"
-export HF_HOME="/root/autodl-tmp/LLM_syco/modelhub/"
-
 python run_llama_logit_cot.py \
   --model_name "$MODEL_NAME" \
   --dataset "mmlu" \
   --max_retries 1 \
-  --question_type "plain" \
-  --prefix_type "" \
-  --prefix_subtype "" \
-  --academic_level "" \
-  --input_filename "prefix_full_question/mmlu/mmlu_plain.pkl" \
+  --question_type "prefix_and_opinion" \
+  --prefix_type "academic" \
+  --prefix_subtype "third_pov" \
+  --academic_level "advanced" \
+  --input_filename "prefix_full_question/mmlu/lib/prefix/third_pov/mmlu_academic_opinion_advanced.pkl" \
   --full_question_column "full_question" \
   --inference_mode "logit_only" \
   --inference_layer "all"
