@@ -1,0 +1,10 @@
+Model Name,Total Questions,Valid Answers,Missing Answers,Correct Answers,Accuracy (%)
+Qwen2.5-1.5B-Instruct,14042,14019,23,7576,54.04
+Qwen2.5-3B-Instruct,14042,14042,0,8859,63.09
+Qwen2.5-7B-Instruct,14042,14042,0,9930,70.72
+Qwen2.5-14B-Instruct,14042,14042,0,10924,77.8
+Llama-3.1-8B-Instruct,14042,14042,0,9223,65.68
+Llama-3.2-1B,14042,14035,7,5085,36.23
+Llama-3.2-1B-Instruct,14042,14011,31,5773,41.2
+Llama-3.2-3B,14042,14008,34,7457,53.23
+Llama-3.2-3B-Instruct,14042,14042,0,8537,60.8
