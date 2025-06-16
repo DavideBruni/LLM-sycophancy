@@ -45,4 +45,4 @@ scancel <JOB_ID>         # cancel a job
 
 # 🌳 Hierarchy Tree for Parameter Selection
 
-<img src="jpg/hierarchy_guide.jpg" alt="guide" width="800"/>
+<img src="img/hierarchy_guide.jpg" alt="guide" width="800"/>
