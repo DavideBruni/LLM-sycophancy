@@ -21,3 +21,5 @@ output_earlydecoding/*
 outputprefix/*
 
 run_llama_logit_cot.py
+
+output_sampling/*
