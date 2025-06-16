@@ -19,7 +19,7 @@ else
   MODEL_NAME="$DEFAULT_MODEL"
 fi
 
-python run_llama_logit_cot.py \
+python run_syco_logit_cot.py \
   --model_name "$MODEL_NAME" \
   --dataset "mmlu" \
   --max_retries 1 \
