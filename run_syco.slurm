@@ -23,7 +23,7 @@ fi
 # Set huggingface cache dir
 export HF_HOME="/ibex/user/wangk0e/cache/huggingface"
 
-python run_llama.py \
+python run_syco.py \
   --model_name "$MODEL_NAME" \
   --dataset "mmlu" \
   --max_retries 1 \
