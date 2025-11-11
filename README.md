@@ -24,6 +24,7 @@ LLMs often exhibit sycophantic behavior, agreeing with user-stated opinions even
 3. **Perspective Analysis**: First-person prompts ("I believe...") induce higher sycophancy than third-person framings ("They believe...")
 
 Our findings highlight that sycophancy is not a surface-level artifact but emerges from a structural override of learned knowledge in deeper layers.
+
 ---
 
 ## Repository Structure
