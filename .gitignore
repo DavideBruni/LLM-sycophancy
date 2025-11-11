@@ -1,25 +1,43 @@
-config.py
+# Python
 __pycache__/
-df/*
-.env
-dcgm/
-logs/
-
-output/mmlupro/*
+*.pyc
+*.pyo
 *.log
+*.egg-info/
+.env
 
-archive/logit_test.py
-
-output/mmlu/archive/*
+# Outputs
+output/
+output_*/
+results/
+checkpoints/
+*.pkl
 *.csv
-analysis_plots/*
-modelhub/*
 
+# Plots and visualizations
+*.png
+*.jpg
+*.pdf
+batch_analysis_plots*/
+analysis_plots/
+
+# Model cache
+modelhub/
+.cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Temporary files
+*.tmp
+*.bak
 a.out
 
-output_earlydecoding/*
-outputprefix/*
-
-run_llama_logit_cot.py
-
-output_sampling/*
+# Data files (keep structure, ignore content)
+data/raw/*
+!data/raw/.gitkeep
+data/processed/*
+!data/processed/.gitkeep
