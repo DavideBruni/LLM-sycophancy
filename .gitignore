@@ -41,3 +41,6 @@ data/raw/*
 !data/raw/.gitkeep
 data/processed/*
 !data/processed/.gitkeep
+
+# Allow project images stored in img/ to be committed (override global image ignore above)
+!img/*.png
