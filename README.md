@@ -8,7 +8,7 @@
 **Keyu Wang\*, Jin Li\*, Shu Yang, Zhuoran Zhang, Di Wang** 
 
 
-*King Abdullah University of Science and Technology*
+*King Abdullah University of Science and Technology*, 
 *Provable Responsible AI and Data Analytics (PRADA) Lab*
 
 \* Equal contribution
