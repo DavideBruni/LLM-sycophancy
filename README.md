@@ -3,7 +3,7 @@
 [![AAAI 2026](https://img.shields.io/badge/AAAI-2026-blue)](https://aaai.org/conference/aaai/aaai-26/)
 [![Paper](https://img.shields.io/badge/Paper-PDF-red)](https://arxiv.org/abs/2508.02087)
 
-![Project overview](img/overview.png)
+![](img/overview.png)
 
 **Keyu Wang\*, Jin Li\*, Shu Yang, Zhuoran Zhang, Di Wang** 
 
