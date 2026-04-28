@@ -1,4 +1,4 @@
-
+# FORK OF THE REPOSITORY, NONE OF THE CODE, IMAGES, AND ALL OTHER ELEMENTS IN THE REPOSITORY IS MINE, UNLESS EXPLICILTY SPECIFIED.
 <div align="center">
 
 ## When Truth Is Overridden: Uncovering the Internal Origins of Sycophancy in Large Language Models
